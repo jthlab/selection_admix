@@ -9,7 +9,8 @@ from scipy.stats import beta
 
 import bmws.estimate
 import bmws.sim
-from bmws.betamix import BetaMixture, sample_paths
+from bmws.betamix import BetaMixture
+from bmws import sample_paths
 
 
 def get_parser():

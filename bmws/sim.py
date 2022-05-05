@@ -1,5 +1,7 @@
 import logging
 
+from bmws.betamix import Dataset
+
 logger = logging.getLogger(__name__)
 from typing import Dict, Union
 
@@ -37,7 +39,6 @@ def sim_wf(
         f[t] = rng.binomial(2 * N[t - 1], p) / (2 * N[t - 1])
     return f
 
-
 def sim_full(
     mdl: Dict,
     seed: int,
@@ -55,54 +56,90 @@ def sim_full(
     size[::d] = n
     return obs, size
 
-
 def sim_and_fit(
     mdl: Dict,
     seed: int,
     lam: float,
     Ne=1e4,  # effective population size
-    n=100,  # sample size - either an integer, or an iterable of sizes
+    n=100,  # sample size - see below
     k=10,  # sampling interval - either an integer, or an iterable of sampling times.
     Ne_fit=None,  # Ne to use for estimation (if different to that used for simulation)
     em_iterations=3,  # use empirical bayes to infer prior hyperparameters
     M=100,  # number of mixture components
     **kwargs
 ):
+    # this is now just a frontend for sim_admix
+    T = len(mdl['s']) + 1
+    mdl = {k: np.array(v)[..., None] for k, v in mdl.items()}
+    N = n
+    K = 1
+    thetas = np.ones([T, N, K])
+    samples = np.zeros([T, N])
+    samples[::k] = n
+    Ne = np.full_like(mdl["s"], Ne)
+    res = sim_admix(mdl, seed, lam, thetas, samples, Ne, Ne_fit, em_iterations, M, **kwargs)
+    return res
+
+def sim_admix(
+    mdl: Dict,
+    seed: int,
+    lam: float,
+    thetas, samples,
+    Ne=1e4,  # effective population size
+    Ne_fit=None,  # Ne to use for estimation (if different to that used for simulation)
+    em_iterations=3,  # use empirical bayes to infer prior hyperparameters
+    M=100,  # number of mixture components
+    **kwargs):
+    '''
+    Simulate from Wright-Fisher model for several populations, sample admixed individulas,
+    and perform inference on resulting dataset.
+
+    Params:
+        n: If an integer, sample this many individuals every k-th time point.
+    '''
     # Parameters
-    T = len(mdl["s"]) + 1  # number of time points
+    assert thetas.ndim == 3
+    T, N, K = thetas.shape
+    assert samples.ndim == 2
+    assert samples.shape == (T, N)
+    assert mdl["s"].ndim == 2
+    assert mdl["s"].shape == (T - 1, K)
+    if isinstance(Ne, float):
+        Ne = np.full_like(mdl["s"], Ne)
+    assert Ne.ndim == 2
+    assert Ne.shape == (T - 1, K)
 
     # Set up population size.
-
-    if isinstance(Ne, int) or isinstance(Ne, float):
-        Ne = np.array([Ne] * (T - 1), dtype=float)
-    else:
-        Ne = np.array(Ne, dtype=float)
-
     if not Ne_fit:
         Ne_fit = Ne
     else:
         Ne_fit = np.array(Ne_fit)
-
-    # Set up sampling scheme
-    sample_times, sample_sizes = k, n
-    if isinstance(n, int) and isinstance(k, int):
-        sample_times = range(T)[::k]
-        sample_sizes = [n for x in sample_times]
+        assert Ne_fit.shape == Ne.shape
 
     # Simulate true trajectory
     rng = np.random.default_rng(seed)
-    # simulate the wright-fisher model. all parametetr vectros are reversed so that times runs from past to present.
-    af = sim_wf(Ne[::-1], mdl["s"][::-1], mdl["h"][::-1], mdl["f0"], rng)[::-1]
-    obs = np.zeros([T, 2])
-    obs[sample_times, :] = [
-        (n, rng.binomial(n, af[t])) for n, t in zip(sample_sizes, sample_times)
-    ]
+    # simulate the wright-fisher model. all parameter vectors are reversed so that times runs from past to present.
+    s = mdl["s"]
+    h = mdl["h"]
+    f0 = mdl["f0"]
+    afs = [sim_wf(Ne_i[::-1], s_i[::-1], h_i[::-1], f0_i, rng)[::-1]
+          for Ne_i, s_i, h_i, f0_i in zip(Ne.T, s.T, h.T, f0.T)]
+    afs = np.transpose(afs)
+    obs = np.zeros([T, N, 2], dtype=int)
+    for t in range(T):
+        for n in range(N):
+            k = rng.choice(K, p=thetas[t, n])
+            p = afs[t, k]
+            a = samples[t, n]
+            d = rng.binomial(a, p)
+            obs[t, n] = [a, d]
+    data = Dataset(thetas=thetas, obs=obs)
 
     # setup prior
-    s = np.zeros(T - 1)
+    s = np.zeros([T - 1, data.K])
     for i in range(em_iterations):
         logger.info("EM iteration %d", i)
-        prior = empirical_bayes(s, obs, Ne, M)
-        s = estimate(obs, Ne_fit, lam=lam, prior=prior, **kwargs)
+        prior = empirical_bayes(s, data, Ne, M)
+        s = estimate(data, Ne_fit, lam=lam, prior=prior, **kwargs)
 
-    return {"s_hat": s, "obs": obs, "Ne": Ne, "true_af": af, "prior": prior}
+    return {"s_hat": s, "obs": obs, "Ne": Ne, "true_af": afs, "prior": prior}

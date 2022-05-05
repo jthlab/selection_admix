@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO)
 
 from bmws.common import Observation
 from bmws.sim import sim_and_fit, sim_wf
-from bmws.estimate import estimate, estimate_em
-from bmws.betamix import sample_paths, BetaMixture
+from bmws.estimate import estimate, estimate_em, sample_paths
+from bmws.betamix import BetaMixture
 
 __all__ = ['estimate', 'estimate_em', 'sim_and_fit', 'sim_wf', 'Observation', 'BetaMixture']
