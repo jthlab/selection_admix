@@ -1,10 +1,10 @@
 "beta mixture with spikes model"
-from typing import NamedTuple, Union, Tuple
+from typing import NamedTuple, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import vmap, lax
+from jax import lax, vmap
 from jax.experimental.host_callback import id_print
 from jax.tree_util import tree_map
 
@@ -96,8 +96,8 @@ def _wf_trans(s, N, a, b):
         * (
             4 * (1 + a + b) * (2 + a + b) * (3 + a + b)
             - 4 * (a - b) * (1 + a + b) * (3 + a + b) * s
-            + (a + a ** 3 - a ** 2 * (-2 + b) + b * (1 + b) ** 2 - a * b * (2 + b))
-            * s ** 2
+            + (a + a**3 - a**2 * (-2 + b) + b * (1 + b) ** 2 - a * b * (2 + b))
+            * s**2
         )
     ) / (4.0 * (a + b) ** 2 * (1 + a + b) ** 2 * (2 + a + b) * (3 + a + b))
     Evar, varE = id_print((Evar, varE), what="Evar/VarE")
@@ -154,7 +154,7 @@ class BetaMixture(NamedTuple):
         b = self.b
         EX = a / (a + b)  # EX
         EX2 = a * (a + 1) / (a + b) / (1 + a + b)  # EX2
-        return jnp.array([EX, EX2 - EX ** 2])
+        return jnp.array([EX, EX2 - EX**2])
 
     def __call__(self, x):
         return np.exp(
@@ -224,6 +224,7 @@ def transition(
         )
         a1, b1 = _wf_trans(s, Ne, a, b)
         return log_p0, log_p1, a1, b1
+
     log_p0, log_p1, a1, b1 = vmap(lp, (0,) * 7)(f.log_p0, f.log_p1, a, b, log_c, s, Ne)
     fs = SpikedBeta(log_p0, log_p1, BetaMixture(a1, b1, log_c))
     # now model binomial sampling
@@ -231,6 +232,7 @@ def transition(
     # probability of data arising from each mixing component
     # a1, b1 = id_print((a1, b1), what="wf_trans")
     from jax.experimental.host_callback import id_print
+
     # fs = id_print(fs, what="binom call")
     ret = _binom_sampling_admix(fs, data)
     # ret = id_print(ret, what="ret/trans")
@@ -279,16 +281,15 @@ def _binom_sampling_admix(fs: SpikedBeta, data: Dataset) -> Tuple[SpikedBeta, fl
         n, d = ob
         fs1, ll1 = vmap(_binom_sampling, in_axes=(None, None, 0))(n, d, fs0)
         ll += logsumexp(jnp.log(theta) + ll1)
+
         def log_comb(x, y):
             u = jnp.log1p(-theta) + x
             v = jnp.log(theta) + y
             # calling logsumexp with both entries negative leads to gradient nans
             simulinf = jnp.isneginf(u) & jnp.isneginf(v)
-            u_safe = jnp.where(simulinf, 1., u)
-            v_safe = jnp.where(simulinf, 1., v)
-            ret = logsumexp(
-                jnp.array([u_safe, v_safe]), axis=0
-            )
+            u_safe = jnp.where(simulinf, 1.0, u)
+            v_safe = jnp.where(simulinf, 1.0, v)
+            ret = logsumexp(jnp.array([u_safe, v_safe]), axis=0)
             return jnp.where(simulinf, -jnp.inf, ret)
 
         # fs0 = id_print(fs0, what="fs0/lp0")
@@ -299,16 +300,14 @@ def _binom_sampling_admix(fs: SpikedBeta, data: Dataset) -> Tuple[SpikedBeta, fl
         lc = log_comb(fs0.f_x.log_c.T, fs1.f_x.log_c.T).T
         b = fs0.f_x._replace(log_c=lc)
         # b = id_print(b, what="b")
-        fs2 = SpikedBeta(log_p0=lp0,
-                         log_p1=lp1,
-                         f_x=b
-                         )
+        fs2 = SpikedBeta(log_p0=lp0, log_p1=lp1, f_x=b)
         # fs2, ll = id_print((fs2,ll), what="fs2")
         return (fs2, ll), None
 
     # ret, _ = _scan(apply, (fs, 0.), data)
     ret, _ = lax.scan(apply, (fs, 0.0), data)
     return ret
+
 
 # @partial(jit, static_argnums=3)
 def forward(s, Ne, data: Dataset, prior: BetaMixture):
@@ -338,7 +337,7 @@ def forward(s, Ne, data: Dataset, prior: BetaMixture):
     ninf = jnp.full(data.K, -jnp.inf)
     pr = SpikedBeta(ninf, ninf, prior)
     # pr = id_print(pr, what='prior')
-    beta0, ll0 = _binom_sampling_admix(pr, Dataset(data.thetas[-1], data.obs[-1]) )
+    beta0, ll0 = _binom_sampling_admix(pr, Dataset(data.thetas[-1], data.obs[-1]))
     # beta0, ll0 = id_print((beta0, ll0), what="ret/init")
 
     if False:
@@ -348,7 +347,8 @@ def forward(s, Ne, data: Dataset, prior: BetaMixture):
         f_x = beta0
         for i in range(1, 1 + len(Ne)):
             f_x, (_, ll) = _f(
-                f_x, {"Ne": Ne[-i], "data": tree_map(lambda x: x[-i-1], data), "s": s[-i]}
+                f_x,
+                {"Ne": Ne[-i], "data": tree_map(lambda x: x[-i - 1], data), "s": s[-i]},
             )
             betas.append(f_x)
             lls.append(ll)

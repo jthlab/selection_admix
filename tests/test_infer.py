@@ -1,6 +1,8 @@
+import jax
+
 from bmws.common import Observation
-from bmws.estimate import estimate, posterior_decoding, sample_paths
-from bmws.sim import sim_and_fit, sim_wf
+from bmws.estimate import sample_paths
+from bmws.sim import sim_admix, sim_and_fit, sim_wf
 
 mdls = [
     {"s": [0.01] * 100, "h": [0.5] * 100, "f0": 0.1},
@@ -19,7 +21,24 @@ def rng():
 
 
 def test_basic_scenario():
-    sim_and_fit(mdls[0], seed=1, lam=1.0, M=100)
+    mdl = {"s": [0.01] * 10, "h": [0.5] * 10, "f0": 0.1}
+    sim_and_fit(mdl, seed=1, lam=1.0, M=10)
+
+
+def test_multipop_scenario():
+    T = 100
+    mdl = {
+        "s": [[0.01] * (T - 1), [0.0] * (T - 1)],
+        "h": [[0.5] * (T - 1)] * 2,
+        "f0": [0.1, 0.1],
+    }
+    mdl = {k: np.transpose(v) for k, v in mdl.items()}
+    N = 10
+    K = 2
+    thetas = np.full([T, N, K], 0.5)
+    samples = np.zeros([T, N])
+    samples[::10] = 100
+    sim_admix(mdl, seed=1, lam=1.0, thetas=thetas, samples=samples, M=10)
 
 
 def test_posterior(rng):

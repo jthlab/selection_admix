@@ -39,6 +39,7 @@ def sim_wf(
         f[t] = rng.binomial(2 * N[t - 1], p) / (2 * N[t - 1])
     return f
 
+
 def sim_full(
     mdl: Dict,
     seed: int,
@@ -56,6 +57,7 @@ def sim_full(
     size[::d] = n
     return obs, size
 
+
 def sim_and_fit(
     mdl: Dict,
     seed: int,
@@ -69,7 +71,7 @@ def sim_and_fit(
     **kwargs
 ):
     # this is now just a frontend for sim_admix
-    T = len(mdl['s']) + 1
+    T = len(mdl["s"]) + 1
     mdl = {k: np.array(v)[..., None] for k, v in mdl.items()}
     N = n
     K = 1
@@ -77,26 +79,31 @@ def sim_and_fit(
     samples = np.zeros([T, N])
     samples[::k] = n
     Ne = np.full_like(mdl["s"], Ne)
-    res = sim_admix(mdl, seed, lam, thetas, samples, Ne, Ne_fit, em_iterations, M, **kwargs)
+    res = sim_admix(
+        mdl, seed, lam, thetas, samples, Ne, Ne_fit, em_iterations, M, **kwargs
+    )
     return res
+
 
 def sim_admix(
     mdl: Dict,
     seed: int,
     lam: float,
-    thetas, samples,
+    thetas,
+    samples,
     Ne=1e4,  # effective population size
     Ne_fit=None,  # Ne to use for estimation (if different to that used for simulation)
     em_iterations=3,  # use empirical bayes to infer prior hyperparameters
     M=100,  # number of mixture components
-    **kwargs):
-    '''
+    **kwargs
+):
+    """
     Simulate from Wright-Fisher model for several populations, sample admixed individulas,
     and perform inference on resulting dataset.
 
     Params:
         n: If an integer, sample this many individuals every k-th time point.
-    '''
+    """
     # Parameters
     assert thetas.ndim == 3
     T, N, K = thetas.shape
@@ -122,8 +129,10 @@ def sim_admix(
     s = mdl["s"]
     h = mdl["h"]
     f0 = mdl["f0"]
-    afs = [sim_wf(Ne_i[::-1], s_i[::-1], h_i[::-1], f0_i, rng)[::-1]
-          for Ne_i, s_i, h_i, f0_i in zip(Ne.T, s.T, h.T, f0.T)]
+    afs = [
+        sim_wf(Ne_i[::-1], s_i[::-1], h_i[::-1], f0_i, rng)[::-1]
+        for Ne_i, s_i, h_i, f0_i in zip(Ne.T, s.T, h.T, f0.T)
+    ]
     afs = np.transpose(afs)
     obs = np.zeros([T, N, 2], dtype=int)
     for t in range(T):

@@ -8,20 +8,29 @@ import jaxopt
 import numpy as np
 import scipy.optimize
 import scipy.stats
-from jax import jit, lax, value_and_grad, numpy as jnp, tree_map, vmap
+from jax import jit, lax
+from jax import numpy as jnp
+from jax import tree_map, value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
 
-from bmws.betamix import BetaMixture, Dataset, _construct_prior, SpikedBeta, forward, loglik
+from bmws.betamix import (
+    BetaMixture,
+    Dataset,
+    SpikedBeta,
+    _construct_prior,
+    forward,
+    loglik,
+)
 
 logger = logging.getLogger(__name__)
 
-logging.getLogger('absl').setLevel(logging.DEBUG)
+logging.getLogger("absl").setLevel(logging.DEBUG)
 
 
 def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
-    r'''
+    r"""
     argmin (1/2)||X - Y||_F^2 + alpha * scaling * ||X||_*
-    '''
+    """
     # aka lasso on spectrum
     u, s, vt = jnp.linalg.svd(X, full_matrices=False, compute_uv=True)
     s_hat = jaxopt.prox.prox_lasso(s, alpha, scaling)
@@ -34,6 +43,7 @@ def _obj(s, Ne, data: Dataset, prior: BetaMixture, lam, C):
     # from jax.experimental.host_callback import id_print
     # _, ret = id_print((s, ret), what="s/ret")
     return ret / C
+
 
 obj = jit(value_and_grad(_obj))
 
@@ -69,20 +79,26 @@ class _Optimizer:
             return _obj(s, Ne, data, prior, 0.0, 1.0)
 
         self._eb_opt = jit(jaxopt.GradientDescent(_eb_loss, implicit_diff=False).run)
-        self._ll_opt = jit(jaxopt.ProximalGradient(
-            fun=_obj, prox=_prox_nuclear_norm, implicit_diff=False).run)
+        self._ll_opt = jit(
+            jaxopt.ProximalGradient(
+                fun=_obj, prox=_prox_nuclear_norm, implicit_diff=False
+            ).run
+        )
 
     def run_eb(self, log_ab0, s, Ne, data):
         res = self._eb_opt(log_ab0, s=s, Ne=Ne, data=data)
-        a_star, b_star = 1. + jnp.exp(res.params)
+        a_star, b_star = 1.0 + jnp.exp(res.params)
         return _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, lam, gamma, Ne, data, prior):
-        f, df = obj(s0, Ne, data, prior, lam, 1.)
-        C = abs(df).max() / 0.2  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
-        res = self._ll_opt(s0, hyperparams_prox=gamma, C=C, lam=lam, Ne=Ne, data=data, prior=prior)
+        f, df = obj(s0, Ne, data, prior, lam, 1.0)
+        C = (
+            abs(df).max() / 0.2
+        )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
+        res = self._ll_opt(
+            s0, hyperparams_prox=gamma, C=C, lam=lam, Ne=Ne, data=data, prior=prior
+        )
         return res.params
-
 
     @classmethod
     def factory(cls, M: int) -> "_Optimizer":
@@ -91,10 +107,9 @@ class _Optimizer:
         return _Optimizer._instance
 
 
-
-
-
-def empirical_bayes(s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0) -> BetaMixture:
+def empirical_bayes(
+    s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0
+) -> BetaMixture:
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
     params0 = jnp.zeros([2, data.K])
@@ -170,7 +185,7 @@ def sample_paths(
     Ne: np.ndarray,
     obs: np.ndarray,
     k: int,
-    seed: int=1,
+    seed: int = 1,
     prior: Union[int, BetaMixture] = BetaMixture.uniform(100),
 ):
     """
@@ -215,9 +230,7 @@ def sample_paths(
     (betas, beta_n), _ = forward(s, Ne, obs, prior)
 
     beta0 = tree_map(lambda a: a[0], betas)
-    beta1n = tree_map(
-        lambda a, b: jnp.concatenate([a[1:], b[None]]), betas, beta_n
-    )
+    beta1n = tree_map(lambda a, b: jnp.concatenate([a[1:], b[None]]), betas, beta_n)
     betas = tree_map(lambda a, b: jnp.concatenate([a, b[None]]), betas, beta_n)
 
     def _f(tup, beta):

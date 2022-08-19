@@ -9,8 +9,8 @@ from scipy.stats import beta
 
 import bmws.estimate
 import bmws.sim
-from bmws.betamix import BetaMixture
 from bmws import sample_paths
+from bmws.betamix import BetaMixture
 
 
 def get_parser():
@@ -161,7 +161,7 @@ def analyze(args):
     data = vcf(args.vcf)
     ids = data.ids
 
-    lam = 10 ** args.lam
+    lam = 10**args.lam
     for snpinfo, gt in data:
         obs = gt_to_obs(ids, gt, meta)
         Ne = np.full(len(obs) - 1, args.Ne)

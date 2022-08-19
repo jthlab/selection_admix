@@ -13,7 +13,7 @@ def f_sh(x: float, s: float, h: float) -> float:
     ret = (
         x
         * (1 + s * h + s * (1 - h) * x)
-        / (1 + 2 * s * h * x + s * (1 - 2 * h) * x ** 2)
+        / (1 + 2 * s * h * x + s * (1 - 2 * h) * x**2)
     )
     # ret = id_print(ret, what="f_sh")
     return ret
