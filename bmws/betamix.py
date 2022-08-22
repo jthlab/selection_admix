@@ -44,6 +44,24 @@ class Dataset(NamedTuple):
     def T(self):
         return self.thetas.shape[0]
 
+    def resort(self) -> Tuple["Dataset", np.ndarray]:
+        """
+        Reorder the dataset such that the nonzero observations come first in epoch.
+
+        Returns:
+            Tuple (ds, nonzero_i) containing the resorted dataset, and a vector nonzero_i of shape [T]
+            containing the index of the highest nonzero entry.
+        """
+        thetar = np.empty_like(self.thetas)
+        obsr = np.empty_like(self.obs)
+        nzi = np.zeros(self.T, dtype=int)
+        for t in range(self.T):
+            nz = self.obs[t, :, 0] > 0
+            obsr[t] = np.concatenate([self.obs[t, nz], self.obs[t, ~nz]])
+            thetar[t] = np.concatenate([self.thetas[t, nz], self.thetas[t, ~nz]])
+            nzi[t] = nz.sum()
+        return Dataset(obs=obsr, thetas=thetar), nzi
+
     @classmethod
     def from_single_pop(cls, obs):
         """Initialize a dataset from observations.
@@ -206,7 +224,7 @@ class SpikedBeta(NamedTuple):
 
 
 def transition(
-    f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset
+    f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, nzi: int
 ) -> SpikedBeta:
     """Given a prior distribution on population allele frequency, compute posterior after
     observing data at dt generations in the future"""
@@ -234,7 +252,7 @@ def transition(
     from jax.experimental.host_callback import id_print
 
     # fs = id_print(fs, what="binom call")
-    ret = _binom_sampling_admix(fs, data)
+    ret = _binom_sampling_admix(fs, data, nzi)
     # ret = id_print(ret, what="ret/trans")
     return ret
 
@@ -265,52 +283,64 @@ def _binom_sampling(n, d, f: SpikedBeta):
     return beta, ll
 
 
-def _binom_sampling_admix(fs: SpikedBeta, data: Dataset) -> Tuple[SpikedBeta, float]:
+def _binom_sampling_admix(
+    fs: SpikedBeta, data: Dataset, nzi: int
+) -> Tuple[SpikedBeta, float]:
     """Compute filtering distributions after sampling a bunch of alleles.
 
     Params:
         fs: initial filtering distributions (arrays of shape [K] or [K, M])
-        data: Dataset containing the observed data
+        data: Dataset containing the observed data [N, 2]
     """
     a, b, _ = fs.f_x
 
     def apply(accum, tup):
         # accum, tup = id_print((accum, tup), what="accum/tup")
-        fs0, ll = accum
+        fs0, ll, i = accum
+
+        def _f1(n, d, fs0, ll, theta):
+            return (fs0, ll)
+
+        def _f2(n, d, fs0, ll, theta):
+            fs1, ll1 = vmap(_binom_sampling, in_axes=(None, None, 0))(n, d, fs0)
+            from jax.experimental.host_callback import id_print
+
+            fs1, _, _, _ = id_print((fs1, (n, d), i, nzi), what="f2: fs1/n/d/i/nnz")
+            ll += logsumexp(jnp.log(theta) + ll1)
+
+            def log_comb(x, y):
+                u = jnp.log1p(-theta) + x
+                v = jnp.log(theta) + y
+                # calling logsumexp with both entries negative leads to gradient nans
+                simulinf = jnp.isneginf(u) & jnp.isneginf(v)
+                u_safe = jnp.where(simulinf, 1.0, u)
+                v_safe = jnp.where(simulinf, 1.0, v)
+                ret = logsumexp(jnp.array([u_safe, v_safe]), axis=0)
+                return jnp.where(simulinf, -jnp.inf, ret)
+
+            # fs0 = id_print(fs0, what="fs0/lp0")
+            lp0 = log_comb(fs0.log_p0, fs1.log_p0)
+            # fs1 = id_print(fs0, what="fs1/lp1")
+            lp1 = log_comb(fs0.log_p1, fs1.log_p1)
+            # fs1 = id_print(fs0, what="fs2/beta")
+            lc = log_comb(fs0.f_x.log_c.T, fs1.f_x.log_c.T).T
+            b = fs0.f_x._replace(log_c=lc)
+            fs2 = SpikedBeta(log_p0=lp0, log_p1=lp1, f_x=b)
+            # ll = id_print((fs2,ll), what="expensive")
+            return (fs2, ll)
+
         theta, ob = tup
         n, d = ob
-        fs1, ll1 = vmap(_binom_sampling, in_axes=(None, None, 0))(n, d, fs0)
-        ll += logsumexp(jnp.log(theta) + ll1)
+        # try to optimize over when n is zero, even though we still do O(N) operations
+        fs2, ll = lax.cond(i > nzi, _f1, _f2, n, d, fs0, ll, theta)
+        return (fs2, ll, i + 1), None
 
-        def log_comb(x, y):
-            u = jnp.log1p(-theta) + x
-            v = jnp.log(theta) + y
-            # calling logsumexp with both entries negative leads to gradient nans
-            simulinf = jnp.isneginf(u) & jnp.isneginf(v)
-            u_safe = jnp.where(simulinf, 1.0, u)
-            v_safe = jnp.where(simulinf, 1.0, v)
-            ret = logsumexp(jnp.array([u_safe, v_safe]), axis=0)
-            return jnp.where(simulinf, -jnp.inf, ret)
-
-        # fs0 = id_print(fs0, what="fs0/lp0")
-        lp0 = log_comb(fs0.log_p0, fs1.log_p0)
-        # fs1 = id_print(fs0, what="fs1/lp1")
-        lp1 = log_comb(fs0.log_p1, fs1.log_p1)
-        # fs1 = id_print(fs0, what="fs2/beta")
-        lc = log_comb(fs0.f_x.log_c.T, fs1.f_x.log_c.T).T
-        b = fs0.f_x._replace(log_c=lc)
-        # b = id_print(b, what="b")
-        fs2 = SpikedBeta(log_p0=lp0, log_p1=lp1, f_x=b)
-        # fs2, ll = id_print((fs2,ll), what="fs2")
-        return (fs2, ll), None
-
-    # ret, _ = _scan(apply, (fs, 0.), data)
-    ret, _ = lax.scan(apply, (fs, 0.0), data)
-    return ret
+    (fs2, ll, _), _ = lax.scan(apply, (fs, 0.0, 0), data)
+    return (fs2, ll)
 
 
 # @partial(jit, static_argnums=3)
-def forward(s, Ne, data: Dataset, prior: BetaMixture):
+def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
     """
     Run the forward algorithm for the BMwS model.
 
@@ -327,17 +357,18 @@ def forward(s, Ne, data: Dataset, prior: BetaMixture):
     assert Ne.shape == (T - 1, data.K)
     assert data.obs.shape == (T, N, 2)
 
-    def _f(fX, d):
-        beta, ll = transition(fX, **d)
-        # beta, ll = id_print((beta, ll), what="_f")
-        return beta, (beta, ll)
+    # from jax.experimental.host_callback import id_print
+    # data = id_print(data, what="data")
 
-    # with admixture loadings, we repeatedly apply binomial sampling individually, and then mixing in the admixture
-    # proportions
+    def _f(accum, d):
+        beta0, ll = accum
+        beta, ll_i = transition(beta0, **d)
+        # beta, ll_i = id_print((beta, ll_i), what="_f")
+        return (beta, ll_i + ll), beta
+
     ninf = jnp.full(data.K, -jnp.inf)
     pr = SpikedBeta(ninf, ninf, prior)
-    # pr = id_print(pr, what='prior')
-    beta0, ll0 = _binom_sampling_admix(pr, Dataset(data.thetas[-1], data.obs[-1]))
+    beta0, ll0 = _binom_sampling_admix(pr, tree_map(lambda x: x[-1], data), nzi[-1])
     # beta0, ll0 = id_print((beta0, ll0), what="ret/init")
 
     if False:
@@ -354,16 +385,19 @@ def forward(s, Ne, data: Dataset, prior: BetaMixture):
             lls.append(ll)
     else:
         data1 = tree_map(lambda x: x[:-1], data)
-        _, (betas, lls) = jax.lax.scan(
-            _f, beta0, {"Ne": Ne, "data": data1, "s": s}, reverse=True
+        (_, ll), betas = lax.scan(
+            _f,
+            (beta0, ll0),
+            {"Ne": Ne, "data": data1, "s": s, "nzi": nzi[:-1]},
+            reverse=True,
         )
+    from jax.experimental.host_callback import id_print
 
-    return (betas, beta0), jnp.concatenate([jnp.array(lls), ll0[None]])
+    return (betas, beta0), ll
 
 
-def loglik(s, Ne, data: Dataset, prior: BetaMixture):
-    betas, lls = forward(s, Ne, data, prior)
-    return lls.sum()
+def loglik(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
+    return forward(s, Ne, data, nzi, prior)[1]
 
 
 def _construct_prior(prior: Union[int, BetaMixture]) -> BetaMixture:

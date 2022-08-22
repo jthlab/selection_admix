@@ -86,23 +86,34 @@ def sim_and_fit(
 
 
 def sim_admix(
-    mdl: Dict,
+    mdl: dict,
     seed: int,
-    lam: float,
     thetas,
     samples,
     Ne=1e4,  # effective population size
     Ne_fit=None,  # Ne to use for estimation (if different to that used for simulation)
-    em_iterations=3,  # use empirical bayes to infer prior hyperparameters
-    M=100,  # number of mixture components
-    **kwargs
+    em_iterations=3,
+    M=100,
+    estimate_kwargs={"lam": 1.0},
 ):
     """
     Simulate from Wright-Fisher model for several populations, sample admixed individulas,
     and perform inference on resulting dataset.
 
     Params:
-        n: If an integer, sample this many individuals every k-th time point.
+        mdl: A dictionary containing the entries "s", "h", and "f0", detailing the selection coefficients, dominance
+             parameters, and initial frequencies. The leading dimensions of each of theses should be K, the number of
+             populations, and the trailing dimension of "s" and "h" should be T - 1, the number of time points minus one.
+        seed: random seed
+        thetas: array of dimension [T, N, K], giving the admixture proportions of each individual at each time point.
+        samples: array of dimension [T, N], giving the number of samples collected from each individual at each time point.
+                 for example, if only haploid data are collected, then every entry of :samples: should be one; if diploid
+                 genotypes are collected, the should be 2. setting samples=0 denotes missing data.
+        Ne: effective population size. Either a number, or an array of shape [T - 1, K] giving the effective population
+            size for each population between each time point. If a number, the same Ne is used for all populations and
+            times.
+        Ne_fit: Ne parameter used for fitting, if different from that used for simulation. Same semantics as Ne.
+        estimate_kwargs: arguments passed to :estimate: when model fitting.
     """
     # Parameters
     assert thetas.ndim == 3
@@ -142,13 +153,22 @@ def sim_admix(
             a = samples[t, n]
             d = rng.binomial(a, p)
             obs[t, n] = [a, d]
-    data = Dataset(thetas=thetas, obs=obs)
+    data, nzi = Dataset(thetas=thetas, obs=obs).resort()
 
     # setup prior
     s = np.zeros([T - 1, data.K])
     for i in range(em_iterations):
         logger.info("EM iteration %d", i)
-        prior = empirical_bayes(s, data, Ne, M)
-        s = estimate(data, Ne_fit, lam=lam, prior=prior, **kwargs)
+        prior = empirical_bayes(s=s, data=data, nzi=nzi, Ne=Ne, M=M)
+        logger.debug("prior: %s", prior)
+        s = estimate(data=data, Ne=Ne_fit, prior=prior, nzi=nzi, **estimate_kwargs)
+        logger.debug("s: %s", s)
 
-    return {"s_hat": s, "obs": obs, "Ne": Ne, "true_af": afs, "prior": prior}
+    return {
+        "s_hat": s,
+        "obs": obs,
+        "Ne": Ne,
+        "true_af": afs,
+        "prior": prior,
+        "data": data,
+    }

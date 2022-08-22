@@ -12,6 +12,7 @@ from jax import jit, lax
 from jax import numpy as jnp
 from jax import tree_map, value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
+from scipy.optimize import minimize
 
 from bmws.betamix import (
     BetaMixture,
@@ -37,12 +38,26 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-def _obj(s, Ne, data: Dataset, prior: BetaMixture, lam, C):
-    ll = loglik(s, Ne, data, prior)
-    ret = -ll + lam * (jnp.diff(s, axis=1) ** 2).sum()
+def _obj(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture, lam, C):
+    # s: [T, K]
+    ll = loglik(s, Ne, data, nzi, prior)
+    ret = -ll + lam * (jnp.diff(s, axis=0) ** 2).sum()
     # from jax.experimental.host_callback import id_print
-    # _, ret = id_print((s, ret), what="s/ret")
+    # _, _, ret = id_print((s.mean(axis=0), prior, ret), what="s/ret/prior")
     return ret / C
+
+
+@partial(jit, static_argnames="M")
+@value_and_grad
+def _eb_loss(ab, s, Ne, data, nzi, M):
+    # ab: [2, K]
+    a, b = ab
+    prior = _interp(a, b, M)
+    ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
+    from jax.experimental.host_callback import id_print
+
+    ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
+    return ret
 
 
 obj = jit(value_and_grad(_obj))
@@ -73,25 +88,41 @@ class _Optimizer:
     M: int
 
     def __post_init__(self):
-        def _eb_loss(log_ab, s, Ne, data):
-            a, b = 1.0 + jnp.exp(log_ab)
-            prior = _interp(a, b, self.M)
-            return _obj(s, Ne, data, prior, 0.0, 1.0)
+        def _f(ab0, **kw):
+            K = kw["data"].K
+            bounds = [[1, 100]] * ab0.size
 
-        self._eb_opt = jit(jaxopt.GradientDescent(_eb_loss, implicit_diff=False).run)
+            def shim(x):
+                f, df = _eb_loss(x.reshape(2, K), **kw, M=self.M)
+                ret = f.astype(np.float64), df.reshape(-1).astype(np.float64)
+                print(x, ret)
+                return ret
+
+            res = minimize(
+                shim,
+                ab0.reshape(-1),
+                jac=True,
+                method="L-BFGS-B",
+                bounds=bounds,
+            )
+            return res.x.reshape(2, K)
+
+        self._eb_opt = _f
         self._ll_opt = jit(
             jaxopt.ProximalGradient(
                 fun=_obj, prox=_prox_nuclear_norm, implicit_diff=False
             ).run
         )
 
-    def run_eb(self, log_ab0, s, Ne, data):
-        res = self._eb_opt(log_ab0, s=s, Ne=Ne, data=data)
-        a_star, b_star = 1.0 + jnp.exp(res.params)
+    def run_eb(self, ab0, s, Ne, data, nzi):
+        res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
+        a_star, b_star = res.params
+        # from jax.experimental.host_callback import id_print
+        # a_star, b_star = id_print((a_star, b_star), what="abstar")
         return _interp(a_star, b_star, self.M)
 
-    def run_ll(self, s0, lam, gamma, Ne, data, prior):
-        f, df = obj(s0, Ne, data, prior, lam, 1.0)
+    def run_ll(self, s0, lam, gamma, Ne, data, nzi, prior):
+        f, df = obj(s0, Ne, data, nzi, prior, lam, 1.0)
         C = (
             abs(df).max() / 0.2
         )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
@@ -108,12 +139,12 @@ class _Optimizer:
 
 
 def empirical_bayes(
-    s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0
+    s, data: Dataset, nzi: np.ndarray, Ne, M, num_steps=100, learning_rate=1.0
 ) -> BetaMixture:
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
-    params0 = jnp.zeros([2, data.K])
-    return opt.run_eb(params0, s, Ne, data)
+    ab0 = jnp.ones([2, data.K])
+    return opt.run_eb(ab0, s, Ne, data, nzi)
 
 
 @partial(jit, static_argnums=5)
