@@ -8,10 +8,11 @@ import jaxopt
 import numpy as np
 import scipy.optimize
 import scipy.stats
-from jax import jit, lax
+from jax import jacfwd, jit, lax
 from jax import numpy as jnp
 from jax import tree_map, value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
+from jax.scipy.special import betaln, xlog1py, xlogy
 from scipy.optimize import minimize
 
 from bmws.betamix import (
@@ -24,8 +25,6 @@ from bmws.betamix import (
 )
 
 logger = logging.getLogger(__name__)
-
-logging.getLogger("absl").setLevel(logging.DEBUG)
 
 
 def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
@@ -43,42 +42,26 @@ def _obj(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture, lam, C):
     ll = loglik(s, Ne, data, nzi, prior)
     ret = -ll + lam * (jnp.diff(s, axis=0) ** 2).sum()
     # from jax.experimental.host_callback import id_print
-    # _, _, ret = id_print((s.mean(axis=0), prior, ret), what="s/ret/prior")
+    # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     return ret / C
-
-
-@partial(jit, static_argnames="M")
-@value_and_grad
-def _eb_loss(ab, s, Ne, data, nzi, M):
-    # ab: [2, K]
-    a, b = ab
-    prior = _interp(a, b, M)
-    ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
-    from jax.experimental.host_callback import id_print
-
-    ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
-    return ret
 
 
 obj = jit(value_and_grad(_obj))
 
 
-def beta_pdf(x, a, b):
-    from jax.scipy.special import betaln, xlog1py, xlogy
-
-    # assumes a, b >= 1.
-    x01 = jnp.isclose(x, 0.0) | jnp.isclose(x, 1.0)
-    safe_x = jnp.where(x01, 0.5, x)
-    return jnp.where(
-        x01,
-        0.0,
-        jnp.exp(xlogy(a - 1, safe_x) + xlog1py(b - 1, -safe_x) - betaln(a, b)),
-    )
+@jnp.vectorize
+def _beta_pdf(x, a, b):
+    x0 = jnp.isclose(x, 0.0)
+    x1 = jnp.isclose(x, 1.0)
+    z = ((a > 1) & x0) | ((b > 1) & x1)
+    x_safe = jnp.where(z, 0.5, x)
+    r = jnp.exp(xlogy(a - 1, x_safe) + xlog1py(b - 1, -x_safe) - betaln(a, b))
+    return jnp.where(z, 0.0, jnp.exp(r))
 
 
 @partial(vmap, in_axes=(0, 0, None))
 def _interp(a, b, M) -> BetaMixture:
-    return BetaMixture.interpolate(lambda x: beta_pdf(x, a, b), M, norm=True)
+    return BetaMixture.interpolate(lambda x: _beta_pdf(x, a, b), M, norm=True, z01=True)
 
 
 @dataclass
@@ -88,62 +71,73 @@ class _Optimizer:
     M: int
 
     def __post_init__(self):
-        def _f(ab0, **kw):
-            K = kw["data"].K
-            bounds = [[1, 100]] * ab0.size
+        def _eb_loss(ab, s, Ne, data, nzi):
+            # ab: [2, K]
+            a, b = ab
+            prior = _interp(a, b, self.M)
+            ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
+            # from jax.experimental.host_callback import id_print
+            # ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
+            return ret
 
-            def shim(x):
-                f, df = _eb_loss(x.reshape(2, K), **kw, M=self.M)
-                ret = f.astype(np.float64), df.reshape(-1).astype(np.float64)
-                print(x, ret)
-                return ret
-
-            res = minimize(
-                shim,
-                ab0.reshape(-1),
-                jac=True,
-                method="L-BFGS-B",
-                bounds=bounds,
-            )
-            return res.x.reshape(2, K)
-
-        self._eb_opt = _f
+        self._eb_opt = jit(
+            jaxopt.ProjectedGradient(
+                fun=_eb_loss, projection=jaxopt.projection.projection_box, tol=0.1
+            ).run
+        )
         self._ll_opt = jit(
             jaxopt.ProximalGradient(
-                fun=_obj, prox=_prox_nuclear_norm, implicit_diff=False
+                fun=_obj,
+                prox=_prox_nuclear_norm,
+                implicit_diff=False,
+                unroll=False,
+                jit=True,
+                tol=0.1,
             ).run
         )
 
     def run_eb(self, ab0, s, Ne, data, nzi):
-        res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
-        a_star, b_star = res.params
+        lb = jnp.full_like(ab0, 1.0 + 1e-4)
+        ub = jnp.full_like(ab0, 100.0)
+        bounds = (lb, ub)
+        res = self._eb_opt(ab0, hyperparams_proj=bounds, s=s, Ne=Ne, data=data, nzi=nzi)
+        # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
+        ab = a_star, b_star = res.params
+        # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
+        # a_star, b_star = res
         # from jax.experimental.host_callback import id_print
         # a_star, b_star = id_print((a_star, b_star), what="abstar")
-        return _interp(a_star, b_star, self.M)
+        return ab, _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, lam, gamma, Ne, data, nzi, prior):
         f, df = obj(s0, Ne, data, nzi, prior, lam, 1.0)
         C = (
-            abs(df).max() / 0.2
+            abs(df).max() / 0.1
         )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
         res = self._ll_opt(
-            s0, hyperparams_prox=gamma, C=C, lam=lam, Ne=Ne, data=data, prior=prior
+            s0,
+            hyperparams_prox=gamma,
+            C=C,
+            lam=lam,
+            Ne=Ne,
+            data=data,
+            prior=prior,
+            nzi=nzi,
         )
         return res.params
 
     @classmethod
     def factory(cls, M: int) -> "_Optimizer":
-        if _Optimizer._instance is None:
-            _Optimizer._instance = _Optimizer(M)
-        return _Optimizer._instance
+        if cls._instance is None:
+            cls._instance = _Optimizer(M)
+        return cls._instance
 
 
 def empirical_bayes(
-    s, data: Dataset, nzi: np.ndarray, Ne, M, num_steps=100, learning_rate=1.0
+    ab0, s, data: Dataset, nzi: np.ndarray, Ne, M, num_steps=100, learning_rate=1.0
 ) -> BetaMixture:
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
-    ab0 = jnp.ones([2, data.K])
     return opt.run_eb(ab0, s, Ne, data, nzi)
 
 
@@ -185,17 +179,18 @@ def estimate_em(
 
 def estimate(
     data: Dataset,
+    nzi: jnp.ndarray,
     Ne: np.ndarray,
     prior: BetaMixture,
     lam: float = 1.0,
-    gamma: float = 1.0,
+    gamma: float = 0.0,
 ):
     assert prior.a.ndim == 2  # [K, M]
     assert prior.a.shape[0] == data.K
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
     s0 = np.zeros([data.T - 1, data.K])
-    return opt.run_ll(s0, lam, gamma, Ne, data, prior)
+    return opt.run_ll(s0, lam, gamma, Ne, data, nzi, prior)
 
 
 def _prep_data(data):

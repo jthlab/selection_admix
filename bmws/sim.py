@@ -1,6 +1,6 @@
 import logging
 
-from bmws.betamix import Dataset
+from bmws.betamix import Dataset, forward
 
 logger = logging.getLogger(__name__)
 from typing import Dict, Union
@@ -94,7 +94,7 @@ def sim_admix(
     Ne_fit=None,  # Ne to use for estimation (if different to that used for simulation)
     em_iterations=3,
     M=100,
-    estimate_kwargs={"lam": 1.0},
+    estimate_kwargs=None,
 ):
     """
     Simulate from Wright-Fisher model for several populations, sample admixed individulas,
@@ -115,6 +115,8 @@ def sim_admix(
         Ne_fit: Ne parameter used for fitting, if different from that used for simulation. Same semantics as Ne.
         estimate_kwargs: arguments passed to :estimate: when model fitting.
     """
+    if estimate_kwargs is None:
+        estimate_kwargs = {"lam": 1.0}
     # Parameters
     assert thetas.ndim == 3
     T, N, K = thetas.shape
@@ -157,15 +159,19 @@ def sim_admix(
 
     # setup prior
     s = np.zeros([T - 1, data.K])
+    ab = np.ones([2, data.K]) + 1e-4
     for i in range(em_iterations):
         logger.info("EM iteration %d", i)
-        prior = empirical_bayes(s=s, data=data, nzi=nzi, Ne=Ne, M=M)
-        logger.debug("prior: %s", prior)
+        ab, prior = empirical_bayes(ab0=ab, s=s, data=data, nzi=nzi, Ne=Ne, M=M)
+        logger.info("ab: %s", ab)
         s = estimate(data=data, Ne=Ne_fit, prior=prior, nzi=nzi, **estimate_kwargs)
-        logger.debug("s: %s", s)
+        logger.info("s: %s", s)
+
+    betas, _ = forward(s, Ne, data, nzi, prior)
 
     return {
         "s_hat": s,
+        "betas": betas,
         "obs": obs,
         "Ne": Ne,
         "true_af": afs,

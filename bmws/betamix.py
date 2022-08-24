@@ -1,4 +1,5 @@
 "beta mixture with spikes model"
+from functools import partial
 from typing import NamedTuple, Tuple, Union
 
 import jax
@@ -10,6 +11,14 @@ from jax.tree_util import tree_map
 
 id_print = lambda x, **kwargs: x
 from jax.scipy.special import betaln, gammaln, logsumexp, xlog1py, xlogy
+
+
+@partial(vmap, in_axes=(0, 0))
+def _safe_lae(x, y):
+    both = jnp.isneginf(x) & jnp.isneginf(y)
+    x_safe = jnp.where(both, 1.0, x)
+    y_safe = jnp.where(both, 1.0, y)
+    return jnp.where(both, -jnp.inf, jnp.logaddexp(x_safe, y_safe))
 
 
 def _scan(f, init, xs, length=None):
@@ -36,13 +45,19 @@ class Dataset(NamedTuple):
     obs: jnp.ndarray
 
     @property
-    def K(self):
+    def K(self) -> int:
         assert self.thetas.ndim == 3
         return self.thetas.shape[2]
 
     @property
-    def T(self):
+    def T(self) -> int:
         return self.thetas.shape[0]
+
+    @property
+    def N(self) -> int:
+        N = self.obs.shape[1]
+        assert N == self.thetas.shape[1]
+        return N
 
     def resort(self) -> Tuple["Dataset", np.ndarray]:
         """
@@ -141,19 +156,30 @@ class BetaMixture(NamedTuple):
     b: np.ndarray
     log_c: np.ndarray
 
+    @property
+    def c(self):
+        return jnp.exp(self.log_c)
+
     @classmethod
     def uniform(cls, M) -> "BetaMixture":
         return cls.interpolate(lambda x: 1.0, M)
 
     @classmethod
-    def interpolate(cls, f, M, norm=False) -> "BetaMixture":
+    def interpolate(cls, f, M, norm=False, z01=True) -> "BetaMixture":
         # bernstein polynomial basis:
         # sum_{i=0}^(M) f(i/M) binom(M,i) x^i (1-x)^(M-i)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) x^(i-1) (1-x)^(M-i+2-1)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) * beta(i,M-i+2) x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
         #   = sum_{i=1}^(M+1) f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
+        a = 1 + z01 - 1
+        b = M + 2 - z01 - 1
         i = jnp.arange(1, M + 2, dtype=float)
-        c = vmap(f)((i - 1) / M) / (1 + M)
+        c = vmap(f)((i[a:b] - 1) / M) / (1 + M)
+        if z01:
+            z = jnp.zeros(1)
+            c = jnp.concatenate([z, c, z])
+        # from jax.experimental.host_callback import id_print
+        # c = id_print(c, what="c")
         c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
         c_safe = jnp.where(c0, 1.0, c)
         log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
@@ -163,7 +189,7 @@ class BetaMixture(NamedTuple):
 
     @property
     def M(self):
-        return len(self.log_c) - 1
+        return self.log_c.shape[-1]
 
     @property
     def moments(self):
@@ -194,25 +220,25 @@ class BetaMixture(NamedTuple):
 
 
 class SpikedBeta(NamedTuple):
-    log_p0: float
-    log_p1: float
-    f_x: BetaMixture
+    log_p: jnp.ndarray  # spikes at 0 and 1
+    f_x: BetaMixture  # abs. continuous component
 
     def sample_component(self, rng):
         sub1, sub2, sub3 = jax.random.split(rng, 4)
         i = jax.random.categorical(sub1, self.f_x.log_c)
         p = jax.random.beta(sub2, self.f_x.a[i], self.f_x.b[i])
-        j = jax.random.categorical(
-            sub3, jnp.array([self.log_p0, self.log_p1, self.log_r])
-        )
+        q = jnp.concatenate([self.log_p, self.log_r[None]])
+        j = jax.random.categorical(sub3, q)
         return jnp.array([0.0, 1.0, p])[j]
 
     @property
     def log_r(self):
-        return jnp.log1p(-jnp.exp(self.log_p0 + self.log_p1))
+        # the probability of the absolutely continuous component
+        return jnp.log1p(-jnp.exp(self.log_p).sum())
 
     @property
     def M(self):
+        "The number of mixture components"
         return self.f_x.M
 
     def plot(self):
@@ -230,117 +256,127 @@ def transition(
     observing data at dt generations in the future"""
     # var(X') = E var(X'|X) + var E(X' | X)
     #         ~= var(X'|X = EX) + var E(X' | X)
-    a, b, log_c = f.f_x
-    # s = id_print(s, what="s")
-    # probability mass for fixation. p(beta=0) = p0 + \int_0^1 f(x) (1-x)^n, and similarly for p1
-    def lp(log_p0, log_p1, a, b, log_c, s, Ne):
-        log_p0 += logsumexp(
-            log_c + gammaln(a + b) + gammaln(b + Ne) - gammaln(b) - gammaln(a + b + Ne),
-        )
-        log_p1 += logsumexp(
-            log_c + gammaln(a + b) + gammaln(a + Ne) - gammaln(a) - gammaln(a + b + Ne),
-        )
-        a1, b1 = _wf_trans(s, Ne, a, b)
-        return log_p0, log_p1, a1, b1
 
-    log_p0, log_p1, a1, b1 = vmap(lp, (0,) * 7)(f.log_p0, f.log_p1, a, b, log_c, s, Ne)
-    fs = SpikedBeta(log_p0, log_p1, BetaMixture(a1, b1, log_c))
-    # now model binomial sampling
-    # p(d_k|d_{k-1},...,d_1) = \int p(d_k|x_k) p(x_k | d_k-1,..,d1)
-    # probability of data arising from each mixing component
-    # a1, b1 = id_print((a1, b1), what="wf_trans")
+    def lp(fi, si, Nei):
+        # compute update spike probabilities and wf transition
+        log_p, (a, b, log_c) = fi
+        x = jnp.array([0, Nei])[:, None]  # [2, 1]
+        log_p_c = logsumexp(
+            log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
+        )  # [2] probability of loss or fixation in continuous component
+        log_p = vmap(jnp.logaddexp, (0, 0))(log_p, log_p_c)
+        a1, b1 = _wf_trans(si, Nei, a, b)
+        return SpikedBeta(log_p, BetaMixture(a1, b1, log_c))
+
     from jax.experimental.host_callback import id_print
 
-    # fs = id_print(fs, what="binom call")
+    # data = id_print(data, what="data")
+    # f = id_print(f, what="before transition")
+    fs = vmap(lp, (0, 0, 0))(f, s, Ne)
+    # fs = id_print(fs, what="after transition")
+    # now process the observation
     ret = _binom_sampling_admix(fs, data, nzi)
-    # ret = id_print(ret, what="ret/trans")
+    # fs = id_print(fs, what="after binom admix")
     return ret
 
 
 def _binom_sampling(n, d, f: SpikedBeta):
-    log_p0, log_p1, (a, b, log_c) = f
-    log_r = jnp.log1p(-jnp.exp(log_p0 + log_p1))
-    log_r, _, _ = id_print((log_r, log_p0, log_p1), what="r/p0/p1")
+    log_p, (a, b, log_c) = f
+    log_r = f.log_r
+    from jax.experimental.host_callback import id_print
+
+    # log_r, log_p = id_print((log_r, log_p), what="r/p0/p1")
     a1 = a + d
     b1 = b + n - d
     # probability of the data given each mixing component
     log_p_mix = betaln(a1, b1) - betaln(a, b) + _logbinom(n, d)
-    log_p_mix = id_print(log_p_mix, what="p_mix")
     log_p01 = log_c + log_p_mix
-    lp0 = log_p0 + jnp.log(d == 0)
-    lp1 = log_p1 + jnp.log(d == n)
-    ll = logsumexp(jnp.concatenate([lp0[None], log_r + log_p01, lp1[None]]))
-    # p(p=1|d) = p(d|p=1)*p01 / pd
-    log_p0 = lp0 - ll
-    log_p1 = lp1 - ll
+    lp = log_p + jnp.log(d == jnp.array([0, n]))
+    log_c1 = log_r + log_p01
+    ll = logsumexp(jnp.concatenate([lp, log_c1]))
+    # p(p=1|d) = p(d|p=1)*p01 / p(d)
+    log_p = lp - ll
     # update mixing coeffs
     # p(c | data) = p(data | c) * p(c) / p(data)
-    log_c1 = log_r + log_p01
     log_c1 -= logsumexp(log_c1)
     # posterior after binomial sampling --
-    beta = SpikedBeta(log_p0, log_p1, BetaMixture(a1, b1, log_c1))
-    # beta = id_print(beta, what="beta")
+    beta = SpikedBeta(log_p, BetaMixture(a1, b1, log_c1))
+    # f, beta = id_print((f, beta), what="f/beta")
     return beta, ll
 
 
 def _binom_sampling_admix(
     fs: SpikedBeta, data: Dataset, nzi: int
 ) -> Tuple[SpikedBeta, float]:
-    """Compute filtering distributions after sampling a bunch of alleles.
+    """Compute filtering distributions after observing alleles.
 
     Params:
         fs: initial filtering distributions (arrays of shape [K] or [K, M])
         data: Dataset containing the observed data [N, 2]
+        nzi: Index of highest nonzero entry in data array. (used to speed up computation.)
     """
-    a, b, _ = fs.f_x
+    from jax.experimental.host_callback import id_print
+
+    M = fs.M
 
     def apply(accum, tup):
         # accum, tup = id_print((accum, tup), what="accum/tup")
         fs0, ll, i = accum
 
-        def _f1(n, d, fs0, ll, theta):
+        def _f1(n, d, fs0, ll, theta) -> Tuple[SpikedBeta, float]:
             return (fs0, ll)
 
-        def _f2(n, d, fs0, ll, theta):
+        def _f2(n, d, fs0, ll, theta) -> Tuple[SpikedBeta, float]:
+            # compute action of binomial sampling across all populations
             fs1, ll1 = vmap(_binom_sampling, in_axes=(None, None, 0))(n, d, fs0)
-            from jax.experimental.host_callback import id_print
-
-            fs1, _, _, _ = id_print((fs1, (n, d), i, nzi), what="f2: fs1/n/d/i/nnz")
+            # _, _, _, _, _, fs0, fs1 = id_print((i, nzi, n, d, theta, fs0, fs1), what="n/d/fs0/fs1")
+            #
+            # fs1, ll1, theta = id_print((fs1, ll1, theta), what="fs1/ll1/theta")
+            #
             ll += logsumexp(jnp.log(theta) + ll1)
 
-            def log_comb(x, y):
-                u = jnp.log1p(-theta) + x
-                v = jnp.log(theta) + y
-                # calling logsumexp with both entries negative leads to gradient nans
-                simulinf = jnp.isneginf(u) & jnp.isneginf(v)
-                u_safe = jnp.where(simulinf, 1.0, u)
-                v_safe = jnp.where(simulinf, 1.0, v)
-                ret = logsumexp(jnp.array([u_safe, v_safe]), axis=0)
-                return jnp.where(simulinf, -jnp.inf, ret)
+            # in each population k the posterior is
+            # (1-theta[k]) * [original mixture] + theta[k] * [new mixture]
+            # combine these into one and retain the M mixture components with the highest weights
+            def _combine(t: float, beta0: SpikedBeta, beta1: SpikedBeta):
+                lt = jnp.array([jnp.log1p(-t), jnp.log(t)])
+                log_c1 = jnp.concatenate(
+                    [lt[0] + beta0.f_x.log_c, lt[1] + beta1.f_x.log_c]
+                )  # [2 * M]
+                a1 = jnp.concatenate([beta0.f_x.a, beta1.f_x.a])
+                b1 = jnp.concatenate([beta0.f_x.b, beta1.f_x.b])
+                r = (
+                    log_c1.argsort()
+                )  # take the M largest mixture components (out of 2M)
+                # log_c1, r, _ = id_print((log_c1, r, logsumexp(log_c1)), what="log_c1/r")
+                top = r[M:]
+                a1 = a1[top]
+                b1 = b1[top]
+                log_c1 = log_c1[top]
+                log_c1 -= logsumexp(log_c1)  # renormalize
+                # now update the spike probabilities
+                log_p1 = _safe_lae(lt[0] + beta0.log_p, lt[1] + beta1.log_p)
+                return SpikedBeta(log_p1, BetaMixture(a1, b1, log_c1))
 
-            # fs0 = id_print(fs0, what="fs0/lp0")
-            lp0 = log_comb(fs0.log_p0, fs1.log_p0)
-            # fs1 = id_print(fs0, what="fs1/lp1")
-            lp1 = log_comb(fs0.log_p1, fs1.log_p1)
-            # fs1 = id_print(fs0, what="fs2/beta")
-            lc = log_comb(fs0.f_x.log_c.T, fs1.f_x.log_c.T).T
-            b = fs0.f_x._replace(log_c=lc)
-            fs2 = SpikedBeta(log_p0=lp0, log_p1=lp1, f_x=b)
-            # ll = id_print((fs2,ll), what="expensive")
+            fs2 = vmap(_combine, (0, 0, 0))(theta, fs0, fs1)
             return (fs2, ll)
 
         theta, ob = tup
         n, d = ob
-        # try to optimize over when n is zero, even though we still do O(N) operations
-        fs2, ll = lax.cond(i > nzi, _f1, _f2, n, d, fs0, ll, theta)
+        # short-circuit to no-op (_f1) when there are no more nonzero observations.
+        # fs2, ll = _f2(n, d, fs0, ll, theta)
+        fs2, ll = lax.cond(i >= nzi, _f1, _f2, n, d, fs0, ll, theta)
         return (fs2, ll, i + 1), None
 
-    (fs2, ll, _), _ = lax.scan(apply, (fs, 0.0, 0), data)
-    return (fs2, ll)
+    # sequentially apply the above function to each observed individual.
+    # expand a/b/log_c to have new mixture components
+    (fs1, ll, _), _ = lax.scan(apply, (fs, 0.0, 0), data)
+    # (fs1, ll, _), _ = _scan(apply, (fs, 0.0, 0), data)
+    return (fs1, ll)
 
 
 # @partial(jit, static_argnums=3)
-def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
+def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, beta: BetaMixture):
     """
     Run the forward algorithm for the BMwS model.
 
@@ -348,6 +384,7 @@ def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
         s: selection coefficient at each time point for each of the K populations (T - 1, K)
         Ne:  diploid effective population size at each time point for each of the K populations (T - 1, K)
         data: data to compute likelihood
+        nzi: number of actual observations (upper bounded by N) at each epoch.
 
     Returns:
         Tuple (betas, lls). betas [T, K, M] are the filtering distributions, and lls are the conditional likelihoods.
@@ -361,33 +398,31 @@ def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
     # data = id_print(data, what="data")
 
     def _f(accum, d):
-        beta0, ll = accum
+        beta0, ll, i = accum
         beta, ll_i = transition(beta0, **d)
-        # beta, ll_i = id_print((beta, ll_i), what="_f")
-        return (beta, ll_i + ll), beta
+        # from jax.experimental.host_callback import id_print
+        # ll_i, i = id_print((ll_i, i), what="_f")
+        return (beta, ll_i + ll, i + 1), beta
 
-    ninf = jnp.full(data.K, -jnp.inf)
-    pr = SpikedBeta(ninf, ninf, prior)
+    ninf = jnp.full([data.K, 2], -100.0)
+    pr = SpikedBeta(ninf, beta)
     beta0, ll0 = _binom_sampling_admix(pr, tree_map(lambda x: x[-1], data), nzi[-1])
-    # beta0, ll0 = id_print((beta0, ll0), what="ret/init")
 
     if False:
         # compile-free loop for debugging
-        lls = []
         betas = []
         f_x = beta0
         for i in range(1, 1 + len(Ne)):
-            f_x, (_, ll) = _f(
+            f_x, ll = _f(
                 f_x,
                 {"Ne": Ne[-i], "data": tree_map(lambda x: x[-i - 1], data), "s": s[-i]},
             )
             betas.append(f_x)
-            lls.append(ll)
     else:
         data1 = tree_map(lambda x: x[:-1], data)
-        (_, ll), betas = lax.scan(
+        (_, ll, _), betas = lax.scan(
             _f,
-            (beta0, ll0),
+            (beta0, ll0, 0),
             {"Ne": Ne, "data": data1, "s": s, "nzi": nzi[:-1]},
             reverse=True,
         )
@@ -396,8 +431,8 @@ def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
     return (betas, beta0), ll
 
 
-def loglik(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture):
-    return forward(s, Ne, data, nzi, prior)[1]
+def loglik(s, Ne, data: Dataset, nzi: jnp.ndarray, beta0: BetaMixture):
+    return forward(s, Ne, data, nzi, beta0)[1]
 
 
 def _construct_prior(prior: Union[int, BetaMixture]) -> BetaMixture:
