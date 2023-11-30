@@ -5,7 +5,7 @@ from typing import NamedTuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import jit, tree_map, tree_multimap, vmap
+from jax import jit, tree_map, vmap
 from jax.experimental.host_callback import id_print
 
 id_print = lambda x, **kwargs: x
