@@ -76,6 +76,7 @@ class _Optimizer:
             a, b = ab
             prior = _interp(a, b, self.M)
             ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
+            print(ret)
             # from jax.experimental.host_callback import id_print
             # ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
             return ret
@@ -100,6 +101,7 @@ class _Optimizer:
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
         ub = jnp.full_like(ab0, 100.0)
         bounds = (lb, ub)
+        print(bounds)
         res = self._eb_opt(ab0, hyperparams_proj=bounds, s=s, Ne=Ne, data=data, nzi=nzi)
         # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
         ab = a_star, b_star = res.params
