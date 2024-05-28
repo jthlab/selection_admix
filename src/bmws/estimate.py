@@ -55,7 +55,7 @@ def _beta_pdf(x, a, b):
     z = ((a > 1) & x0) | ((b > 1) & x1)
     x_safe = jnp.where(z, 0.5, x)
     r = jnp.exp(xlogy(a - 1, x_safe) + xlog1py(b - 1, -x_safe) - betaln(a, b))
-    return jnp.where(z, 0.0, jnp.exp(r))
+    return jnp.where(z, 0.0, r)
 
 
 @partial(vmap, in_axes=(0, 0, None))
