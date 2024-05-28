@@ -6,10 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax, vmap
-from jax.experimental.host_callback import id_print
-from jax.tree_util import tree_map
-
-id_print = lambda x, **kwargs: x
 from jax.scipy.special import betaln, gammaln, logsumexp, xlog1py, xlogy
 
 
@@ -41,6 +37,7 @@ class Dataset(NamedTuple):
         obs: array of shape [T, N, 2]; obs[t, i, 0] is the number of alleles sampled from indiv. i at time t, while
             obs[t, i, 1] is the number of derived alleles that were observed.
     """
+
     thetas: jnp.ndarray
     obs: jnp.ndarray
 
@@ -103,7 +100,6 @@ def _wf_trans(s, N, a, b):
     #
     # E(Y | 0 < Y < N) = N(p' - p'^n)
     # EX' = Ep'(1-p'^{N-1})
-    a, b = id_print((a, b), what="ab")
     EX = (a * (2 + 2 * a + b * (2 + s))) / (2.0 * (a + b) * (1 + a + b))
     # EX = 0.5 * (
     #     (a * (2 + 2 * a + b * (2 + s))) / (a + b) / (1 + a + b)
@@ -129,19 +125,15 @@ def _wf_trans(s, N, a, b):
         * (
             4 * (1 + a + b) * (2 + a + b) * (3 + a + b)
             - 4 * (a - b) * (1 + a + b) * (3 + a + b) * s
-            + (a + a**3 - a**2 * (-2 + b) + b * (1 + b) ** 2 - a * b * (2 + b))
-            * s**2
+            + (a + a**3 - a**2 * (-2 + b) + b * (1 + b) ** 2 - a * b * (2 + b)) * s**2
         )
     ) / (4.0 * (a + b) ** 2 * (1 + a + b) ** 2 * (2 + a + b) * (3 + a + b))
-    Evar, varE = id_print((Evar, varE), what="Evar/VarE")
     var = Evar + varE
     # EX = E(p')
     # var = E(p'(1-p')/N) + var(p) + (s/2)^2 var(p(1-p)) + s * cov(p, p(1-p))
     u = EX * (1 - EX) / var - 1.0
-    u = id_print(u, what="u")
     a1 = u * EX
     b1 = u * (1 - EX)
-    a1, b1 = id_print((a1, b1), what="a1b1")
     return a1, b1
 
 
@@ -178,8 +170,6 @@ class BetaMixture(NamedTuple):
         if z01:
             z = jnp.zeros(1)
             c = jnp.concatenate([z, c, z])
-        # from jax.experimental.host_callback import id_print
-        # c = id_print(c, what="c")
         c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
         c_safe = jnp.where(c0, 1.0, c)
         log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
@@ -268,24 +258,15 @@ def transition(
         a1, b1 = _wf_trans(si, Nei, a, b)
         return SpikedBeta(log_p, BetaMixture(a1, b1, log_c))
 
-    from jax.experimental.host_callback import id_print
-
-    # data = id_print(data, what="data")
-    # f = id_print(f, what="before transition")
     fs = vmap(lp, (0, 0, 0))(f, s, Ne)
-    # fs = id_print(fs, what="after transition")
     # now process the observation
     ret = _binom_sampling_admix(fs, data, nzi)
-    # fs = id_print(fs, what="after binom admix")
     return ret
 
 
 def _binom_sampling(n, d, f: SpikedBeta):
     log_p, (a, b, log_c) = f
     log_r = f.log_r
-    from jax.experimental.host_callback import id_print
-
-    # log_r, log_p = id_print((log_r, log_p), what="r/p0/p1")
     a1 = a + d
     b1 = b + n - d
     # probability of the data given each mixing component
@@ -301,7 +282,6 @@ def _binom_sampling(n, d, f: SpikedBeta):
     log_c1 -= logsumexp(log_c1)
     # posterior after binomial sampling --
     beta = SpikedBeta(log_p, BetaMixture(a1, b1, log_c1))
-    # f, beta = id_print((f, beta), what="f/beta")
     return beta, ll
 
 
@@ -315,12 +295,9 @@ def _binom_sampling_admix(
         data: Dataset containing the observed data [N, 2]
         nzi: Index of highest nonzero entry in data array. (used to speed up computation.)
     """
-    from jax.experimental.host_callback import id_print
-
     M = fs.M
 
     def apply(accum, tup):
-        # accum, tup = id_print((accum, tup), what="accum/tup")
         fs0, ll, i = accum
 
         def _f1(n, d, fs0, ll, theta) -> Tuple[SpikedBeta, float]:
@@ -329,10 +306,6 @@ def _binom_sampling_admix(
         def _f2(n, d, fs0, ll, theta) -> Tuple[SpikedBeta, float]:
             # compute action of binomial sampling across all populations
             fs1, ll1 = vmap(_binom_sampling, in_axes=(None, None, 0))(n, d, fs0)
-            # _, _, _, _, _, fs0, fs1 = id_print((i, nzi, n, d, theta, fs0, fs1), what="n/d/fs0/fs1")
-            #
-            # fs1, ll1, theta = id_print((fs1, ll1, theta), what="fs1/ll1/theta")
-            #
             ll += logsumexp(jnp.log(theta) + ll1)
 
             # in each population k the posterior is
@@ -348,7 +321,6 @@ def _binom_sampling_admix(
                 r = (
                     log_c1.argsort()
                 )  # take the M largest mixture components (out of 2M)
-                # log_c1, r, _ = id_print((log_c1, r, logsumexp(log_c1)), what="log_c1/r")
                 top = r[M:]
                 a1 = a1[top]
                 b1 = b1[top]
@@ -394,19 +366,14 @@ def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, beta: BetaMixture):
     assert Ne.shape == (T - 1, data.K)
     assert data.obs.shape == (T, N, 2)
 
-    # from jax.experimental.host_callback import id_print
-    # data = id_print(data, what="data")
-
     def _f(accum, d):
         beta0, ll, i = accum
         beta, ll_i = transition(beta0, **d)
-        # from jax.experimental.host_callback import id_print
-        # ll_i, i = id_print((ll_i, i), what="_f")
         return (beta, ll_i + ll, i + 1), beta
 
     ninf = jnp.full([data.K, 2], -100.0)
     pr = SpikedBeta(ninf, beta)
-    beta0, ll0 = _binom_sampling_admix(pr, tree_map(lambda x: x[-1], data), nzi[-1])
+    beta0, ll0 = _binom_sampling_admix(pr, jax.tree.map(lambda x: x[-1], data), nzi[-1])
 
     if False:
         # compile-free loop for debugging
@@ -415,18 +382,21 @@ def forward(s, Ne, data: Dataset, nzi: jnp.ndarray, beta: BetaMixture):
         for i in range(1, 1 + len(Ne)):
             f_x, ll = _f(
                 f_x,
-                {"Ne": Ne[-i], "data": tree_map(lambda x: x[-i - 1], data), "s": s[-i]},
+                {
+                    "Ne": Ne[-i],
+                    "data": jax.tree.map(lambda x: x[-i - 1], data),
+                    "s": s[-i],
+                },
             )
             betas.append(f_x)
     else:
-        data1 = tree_map(lambda x: x[:-1], data)
+        data1 = jax.tree.map(lambda x: x[:-1], data)
         (_, ll, _), betas = lax.scan(
             _f,
             (beta0, ll0, 0),
             {"Ne": Ne, "data": data1, "s": s, "nzi": nzi[:-1]},
             reverse=True,
         )
-    from jax.experimental.host_callback import id_print
 
     return (betas, beta0), ll
 

@@ -10,7 +10,7 @@ import scipy.optimize
 import scipy.stats
 from jax import jacfwd, jit, lax
 from jax import numpy as jnp
-from jax import tree_map, value_and_grad, vmap
+from jax import value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
 from jax.scipy.special import betaln, xlog1py, xlogy
 from scipy.optimize import minimize
@@ -41,7 +41,6 @@ def _obj(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture, lam, C):
     # s: [T, K]
     ll = loglik(s, Ne, data, nzi, prior)
     ret = -ll + lam * (jnp.diff(s, axis=0) ** 2).sum()
-    # from jax.experimental.host_callback import id_print
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     return ret / C
 
@@ -77,7 +76,6 @@ class _Optimizer:
             prior = _interp(a, b, self.M)
             ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
             print(ret)
-            # from jax.experimental.host_callback import id_print
             # ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
             return ret
 
@@ -107,8 +105,6 @@ class _Optimizer:
         ab = a_star, b_star = res.params
         # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
         # a_star, b_star = res
-        # from jax.experimental.host_callback import id_print
-        # a_star, b_star = id_print((a_star, b_star), what="abstar")
         return ab, _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, lam, gamma, Ne, data, nzi, prior):
@@ -257,9 +253,9 @@ def sample_paths(
 
     (betas, beta_n), _ = forward(s, Ne, obs, prior)
 
-    beta0 = tree_map(lambda a: a[0], betas)
-    beta1n = tree_map(lambda a, b: jnp.concatenate([a[1:], b[None]]), betas, beta_n)
-    betas = tree_map(lambda a, b: jnp.concatenate([a, b[None]]), betas, beta_n)
+    beta0 = jax.tree.map(lambda a: a[0], betas)
+    beta1n = jax.tree.map(lambda a, b: jnp.concatenate([a[1:], b[None]]), betas, beta_n)
+    betas = jax.tree.map(lambda a, b: jnp.concatenate([a, b[None]]), betas, beta_n)
 
     def _f(tup, beta):
         rng, s1 = tup
