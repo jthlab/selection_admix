@@ -1,8 +1,33 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools_scm]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
 
 [tool.isort]
 profile = "black"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.version]
+source = "scm"
+
+[project]
+name = "bmws"
+description = "Beta-mixture with spikes model"
+authors = [
+    {name = "Jonathan Terhorst", email = "jonth@umich.edu"},
+    {name = "Iain Mathieson <mathi@pennmedicine.upenn.edu> and Jonathan Terhorst <jonth@umich.edu>"},
+]
+dependencies = [
+    "jax>=0.4.25",
+    "matplotlib<4,>=3",
+    "numpy<2,>=1.20",
+    "scipy>=1.12,<2",
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "GNU GPLv3+"}
+dynamic = ["version"]
+
+[project.scripts]
+bmws = "bmws.cli:bmws_main"
