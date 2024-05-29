@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
-from common import binom_logpmf, binom_pmf
 from scipy.stats import binom
+
+from bmws.common import binom_logpmf, binom_pmf
 
 
 @pytest.fixture(params=range(10))
