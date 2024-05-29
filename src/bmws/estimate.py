@@ -37,10 +37,11 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-def _obj(s, Ne, data: Dataset, prior: BetaMixture, lam, C):
+def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta, C):
     # s: [T, K]
     ll = loglik(s, Ne, data, prior)
-    ret = -ll + lam * (jnp.diff(s, axis=0) ** 2).sum()
+    pairwise_diff = 0.5 * jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
+    ret = -ll + alpha * (jnp.diff(s, axis=0) ** 2).sum() + beta * pairwise_diff
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     return ret / C
 
@@ -74,7 +75,7 @@ class _Optimizer:
             # ab: [2, K]
             a, b = ab
             prior = _interp(a, b, self.M)
-            return _obj(s, Ne, data, prior, 0.0, 1.0)
+            return _obj(s, Ne, data, prior, alpha=0.0, beta=0.0, C=1.0)
 
         opt = jaxopt.ProjectedGradient(
             fun=_eb_loss,
@@ -104,8 +105,8 @@ class _Optimizer:
         # a_star, b_star = res
         return ab, _interp(a_star, b_star, self.M)
 
-    def run_ll(self, s0, lam, gamma, Ne, data, prior):
-        f, df = obj(s0, Ne, data, prior, lam, 1.0)
+    def run_ll(self, s0, alpha, beta, gamma, Ne, data, prior):
+        f, df = obj(s0, Ne, data, prior, alpha, beta, 1.0)
         C = (
             abs(df).max() / 0.1
         )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
@@ -113,7 +114,8 @@ class _Optimizer:
             s0,
             hyperparams_prox=gamma,
             C=C,
-            lam=lam,
+            alpha=alpha,
+            beta=beta,
             Ne=Ne,
             data=data,
             prior=prior,
@@ -158,8 +160,10 @@ def jittable_estimate(obs, Ne, lam, prior, learning_rate=0.1, num_steps=100):
 def estimate_em(
     obs: np.ndarray,
     Ne: np.ndarray,
+    alpha,
+    beta,
+    gamma,
     em_iterations: int = 3,
-    lam: float = 1.0,
     solver_options: dict = {},
 ):
     M = 100
@@ -174,16 +178,19 @@ def estimate_em(
 def estimate(
     data: Dataset,
     Ne: np.ndarray,
+    alpha,
+    beta,
+    gamma,
     prior: BetaMixture,
-    lam: float = 1.0,
-    gamma: float = 0.0,
 ):
     assert prior.a.ndim == 2  # [K, M]
     assert prior.a.shape[0] == data.K
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
     s0 = np.zeros([data.T, data.K])
-    return opt.run_ll(s0, lam, gamma, Ne, data, prior)
+    return opt.run_ll(
+        s0=s0, Ne=Ne, alpha=alpha, beta=beta, gamma=gamma, data=data, prior=prior
+    )
 
 
 def _prep_data(data):

@@ -95,6 +95,22 @@ for gen, count in data["generation"].value_counts().items():
 
 data = Dataset.from_records(records)
 
+# ## New objective function
+# Additional regularization terms have been added. The estimand $\mathbf{s}\in\mathbb{R}^{T\times K}$ is now a matrix with $T$ rows (time points) and $K$ columns/populations. The new objective function is:
+#
+# $$f(\mathbf{s}) = -\mathrm{loglik}(\text{data}\mid N_e,\mathbf{s}) 
+# + \alpha \sum_k \sum_{t=2}^T (s_{k,t} - s_{k,t-1})^2 
+# + \beta \sum_t \sum_{k_1,k_2 \in [K]} (s_{k_1,t} - s_{k_2,t})^2 
+# + \gamma \Vert \mathbf{s} \Vert_*$$
+#
+# so:
+#
+# - $\alpha$ controls smoothness "across time" of the $s_{kt}$ for each population $k$
+# - $\beta$ controls smoothness "between groups"
+# - $\gamma$ penalizes the rank of the matrix $s$, setting $\gamma\to\infty$ makes each estimated $s$ become a scalar multiple of the other.
+#
+# $\beta$ and $\gamma$ sort of aim at the same goal, we'll need to experiment to see which makes more sense.
+
 # +
 #Run analysis - no longer fails!
 em_iterations=1
@@ -103,7 +119,7 @@ Ne=np.full([data.T, data.K], 1e4)
 Ne_fit=Ne
 s = np.zeros([data.T, data.K])
 ab = np.ones([2, data.K]) + 1e-4
-estimate_kwargs={"lam": 1e4, "gamma": 0.0}
+estimate_kwargs={"alpha": 0, "beta": 0, "gamma": 1e-4}
 
 with jax.debug_nans(True):
     for i in range(em_iterations):
@@ -120,36 +136,3 @@ plt.plot(s[:, 0], color="tab:blue", alpha=1)
 plt.plot(s[:, 1], color="tab:orange", alpha=1)
 plt.plot(s[:, 2], color="tab:green", alpha=1)
 plt.xscale('log')
-
-# +
-#Replace observations with random alleles with frequency 50%
-#This runs fine. 
-
-obs2 = np.zeros([T, N, 2], dtype=int)
-for t in range(T):
-    for n in range(N):
-        a = obs[t, n, 0]
-        d = rng.binomial(a, 0.5)
-        obs2[t, n] = [a, d]
-data, nzi = Dataset(thetas=thetas, obs=obs2).resort()
-
-em_iterations=1
-M=100
-Ne=np.zeros([T - 1, data.K]) + 10000
-Ne_fit=Ne
-s = np.zeros([T - 1, data.K])
-ab = np.ones([2, data.K]) + 1e-4
-estimate_kwargs={"lam": 1e4, "gamma": 0.0}
-
-for i in range(em_iterations):
-    logger.info("EM iteration %d", i)
-    ab, prior = empirical_bayes(ab0=ab, s=s, data=data, nzi=nzi, Ne=Ne, M=M)
-    logger.info("ab: %s", ab)
-    s = estimate(data=data, Ne=Ne_fit, prior=prior, nzi=nzi, **estimate_kwargs)
-    logger.info("s: %s", s)
-
-betas, _ = forward(s, Ne, data, nzi, prior)
-
-# -
-
-
