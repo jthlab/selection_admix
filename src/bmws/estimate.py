@@ -37,9 +37,9 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-def _obj(s, Ne, data: Dataset, nzi: jnp.ndarray, prior: BetaMixture, lam, C):
+def _obj(s, Ne, data: Dataset, prior: BetaMixture, lam, C):
     # s: [T, K]
-    ll = loglik(s, Ne, data, nzi, prior)
+    ll = loglik(s, Ne, data, prior)
     ret = -ll + lam * (jnp.diff(s, axis=0) ** 2).sum()
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     return ret / C
@@ -70,45 +70,41 @@ class _Optimizer:
     M: int
 
     def __post_init__(self):
-        def _eb_loss(ab, s, Ne, data, nzi):
+        def _eb_loss(ab, s, Ne, data):
             # ab: [2, K]
             a, b = ab
             prior = _interp(a, b, self.M)
-            ret = _obj(s, Ne, data, nzi, prior, 0.0, 1.0)
-            print(ret)
-            # ret, _, _ = id_print((ret, ab, s.mean(axis=0)), what="ret/log_ab/s")
-            return ret
+            return _obj(s, Ne, data, prior, 0.0, 1.0)
 
-        self._eb_opt = jit(
-            jaxopt.ProjectedGradient(
-                fun=_eb_loss, projection=jaxopt.projection.projection_box, tol=0.1
-            ).run
+        opt = jaxopt.ProjectedGradient(
+            fun=_eb_loss,
+            projection=jaxopt.projection.projection_box,
+            tol=0.1,
+            implicit_diff=False,
+            unroll=True,
+            jit=True,
         )
-        self._ll_opt = jit(
-            jaxopt.ProximalGradient(
-                fun=_obj,
-                prox=_prox_nuclear_norm,
-                implicit_diff=False,
-                unroll=False,
-                jit=True,
-                tol=0.1,
-            ).run
-        )
+        self._eb_opt = jit(opt.run)
+        opt = jaxopt.ProximalGradient(
+            fun=_obj,
+            implicit_diff=False,
+            # unroll=False,
+            # jit=True,
+            tol=0.1,
+        ).run
+        self._ll_opt = jit(opt)
 
-    def run_eb(self, ab0, s, Ne, data, nzi):
+    def run_eb(self, ab0, s, Ne, data):
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
         ub = jnp.full_like(ab0, 100.0)
         bounds = (lb, ub)
-        print(bounds)
-        res = self._eb_opt(ab0, hyperparams_proj=bounds, s=s, Ne=Ne, data=data, nzi=nzi)
-        # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
+        res = self._eb_opt(ab0, hyperparams_proj=bounds, s=s, Ne=Ne, data=data)
         ab = a_star, b_star = res.params
-        # res = self._eb_opt(ab0, s=s, Ne=Ne, data=data, nzi=nzi)
         # a_star, b_star = res
         return ab, _interp(a_star, b_star, self.M)
 
-    def run_ll(self, s0, lam, gamma, Ne, data, nzi, prior):
-        f, df = obj(s0, Ne, data, nzi, prior, lam, 1.0)
+    def run_ll(self, s0, lam, gamma, Ne, data, prior):
+        f, df = obj(s0, Ne, data, prior, lam, 1.0)
         C = (
             abs(df).max() / 0.1
         )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
@@ -120,7 +116,6 @@ class _Optimizer:
             Ne=Ne,
             data=data,
             prior=prior,
-            nzi=nzi,
         )
         return res.params
 
@@ -132,11 +127,11 @@ class _Optimizer:
 
 
 def empirical_bayes(
-    ab0, s, data: Dataset, nzi: np.ndarray, Ne, M, num_steps=100, learning_rate=1.0
+    ab0, s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0
 ) -> BetaMixture:
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
-    return opt.run_eb(ab0, s, Ne, data, nzi)
+    return opt.run_eb(ab0, s, Ne, data)
 
 
 @partial(jit, static_argnums=5)
@@ -177,7 +172,6 @@ def estimate_em(
 
 def estimate(
     data: Dataset,
-    nzi: jnp.ndarray,
     Ne: np.ndarray,
     prior: BetaMixture,
     lam: float = 1.0,
@@ -187,8 +181,8 @@ def estimate(
     assert prior.a.shape[0] == data.K
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
-    s0 = np.zeros([data.T - 1, data.K])
-    return opt.run_ll(s0, lam, gamma, Ne, data, nzi, prior)
+    s0 = np.zeros([data.T, data.K])
+    return opt.run_ll(s0, lam, gamma, Ne, data, prior)
 
 
 def _prep_data(data):

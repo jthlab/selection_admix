@@ -1,10 +1,12 @@
-import jax
-
-jax.config.update("jax_enable_x64", True)
 import logging
 
+import jax
+import platformdirs
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_compilation_cache_dir", platformdirs.user_cache_dir("bmws"))
+
 logging.getLogger("absl").setLevel(logging.ERROR)
-logging.basicConfig(level=logging.INFO)
 
 from bmws.betamix import BetaMixture
 from bmws.common import Observation
