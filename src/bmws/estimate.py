@@ -87,6 +87,7 @@ class _Optimizer:
         self._eb_opt = jit(opt.run)
         opt = jaxopt.ProximalGradient(
             fun=_obj,
+            prox=_prox_nuclear_norm,
             implicit_diff=False,
             # unroll=False,
             # jit=True,
