@@ -11,6 +11,13 @@ distribution = true
 [tool.pdm.version]
 source = "scm"
 
+[tool.pdm.dev-dependencies]
+dev = [
+    "pytest>=8.2.1",
+    "notebook<7",
+    "pandas>=2.2.2",
+    "jupytext>=1.16.2",
+]
 [project]
 name = "bmws"
 description = "Beta-mixture with spikes model"
@@ -19,15 +26,23 @@ authors = [
     {name = "Iain Mathieson <mathi@pennmedicine.upenn.edu> and Jonathan Terhorst <jonth@umich.edu>"},
 ]
 dependencies = [
-    "jax>=0.4.25",
     "matplotlib<4,>=3",
     "numpy<2,>=1.20",
     "scipy>=1.12,<2",
+    "jax[cpu]>=0.4.28",
+    "jaxopt>=0.8.3",
+    "loguru>=0.7.2",
+    "platformdirs>=4.2.2",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "GNU GPLv3+"}
 dynamic = ["version"]
 
 [project.scripts]
 bmws = "bmws.cli:bmws_main"
+
+[project.optional-dependencies]
+gpu = [
+    "jax[cuda12]>=0.4.28",
+]
