@@ -1,7 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py
+#     formats: ipynb,py:light
 #     text_representation:
 #       extension: .py
 #       format_name: light
@@ -119,6 +119,7 @@ betas, _ = forward(s, Ne, data, prior)
 plt.plot(s[:, 0], color="tab:blue", alpha=1)
 plt.plot(s[:, 1], color="tab:orange", alpha=1)
 plt.plot(s[:, 2], color="tab:green", alpha=1)
+plt.xscale('log')
 
 # +
 #Replace observations with random alleles with frequency 50%
