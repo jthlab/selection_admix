@@ -1,0 +1,29 @@
+PLINK v1.90p 64-bit (16 Apr 2021)
+Options in effect:
+  --bfile data/selection_filtering/eur_all
+  --out data/time_series_input/eur_snp_acs
+  --recode A include-alt
+  --snps rs17843625,rs174548,rs12913832,rs4988235,rs1426654,rs160578,rs16891982,rs6555913,rs2245556,rs3091338,rs7225592
+
+Hostname: math4
+Working directory: /project/mathilab/colbranl/eas_selection
+Start time: Thu May 30 12:50:40 2024
+
+Random number seed: 1717087840
+385251 MB RAM detected; reserving 192625 MB for main workspace.
+1233013 variants loaded from .bim file.
+5169 people (2871 males, 2251 females, 47 ambiguous) loaded from .fam.
+Ambiguous sex IDs written to data/time_series_input/eur_snp_acs.nosex .
+5169 phenotype values loaded from .fam.
+--snps: 11 variants remaining.
+Warning: Ignoring phenotypes of missing-sex samples.  If you don't want those
+phenotypes to be ignored, use the --allow-no-sex flag.
+Using 1 thread (no multithreaded calculations invoked).
+Before main variant filters, 5169 founders and 0 nonfounders present.
+Calculating allele frequencies... done.
+Total genotyping rate is 0.577024.
+11 variants and 5169 people pass filters and QC.
+Among remaining phenotypes, 0 are cases and 5169 are controls.
+--recode A to data/time_series_input/eur_snp_acs.raw ... done.
+
+End time: Thu May 30 12:50:41 2024
