@@ -12,6 +12,17 @@ from loguru import logger
 from bmws.data import Dataset
 
 
+def _breakpoint_if_nonfinite(x):
+    all_finite = lambda x: jnp.isfinite(x).all()
+    is_finite = jax.tree.reduce(lambda a, b: all_finite(a) & all_finite(b), x)
+    def true_fn(x):
+        return x
+    def false_fn(x):
+        jax.debug.breakpoint()
+        return x
+    return lax.cond(is_finite, true_fn, false_fn, x)
+
+
 @partial(vmap, in_axes=(0, 0))
 def _safe_lae(x, y):
     both = jnp.isneginf(x) & jnp.isneginf(y)
@@ -197,13 +208,16 @@ def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
     def lp(fi, si, Nei):
         # compute update spike probabilities and wf transition
         log_p, (a, b, log_c) = fi
+        log_r = fi.log_r
         x = jnp.array([0, Nei])[:, None]  # [2, 1]
+        # probability mass for fixation. p(beta=0) = p0 + (1-p0) * \int_0^1 f(x) (1-x)^n, and similarly for p1
         log_p_c = logsumexp(
-            log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
+            log_r + log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
         )  # [2] probability of loss or fixation in continuous component
-        log_p = vmap(jnp.logaddexp, (0, 0))(log_p, log_p_c)
+        log_p1 = vmap(jnp.logaddexp, (0, 0))(log_p, log_p_c)
         a1, b1 = _wf_trans(si, Nei, a, b)
-        return SpikedBeta(log_p, BetaMixture(a1, b1, log_c))
+        # jax.debug.print("log_p:{} log_p1:{}", log_p, log_p1)
+        return SpikedBeta(log_p1, BetaMixture(a1, b1, log_c))
 
     return lp(f, s, Ne)
 
@@ -225,6 +239,8 @@ def _binom_sampling(n, d, f: SpikedBeta):
     # p(c | data) = p(data | c) * p(c) / p(data)
     log_c1 -= logsumexp(log_c1)
     # posterior after binomial sampling --
+    # clip to avoid numerical issues -- if p0/p1 ~= 1 then the model becomes degenerate
+    log_p = jnp.clip(log_p, -100, -1e-5)
     beta = SpikedBeta(log_p, BetaMixture(a1, b1, log_c1))
     return beta, ll
 
