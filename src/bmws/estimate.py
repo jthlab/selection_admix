@@ -37,13 +37,13 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta, C):
+def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
     # s: [T, K]
     ll = loglik(s, Ne, data, prior)
     pairwise_diff = 0.5 * jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
     ret = -ll + alpha * (jnp.diff(s, axis=0) ** 2).sum() + beta * pairwise_diff
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
-    return ret / C
+    return ret
 
 
 obj = jit(value_and_grad(_obj))
@@ -75,23 +75,24 @@ class _Optimizer:
             # ab: [2, K]
             a, b = ab
             prior = _interp(a, b, self.M)
-            return _obj(s, Ne, data, prior, alpha=0.0, beta=0.0, C=1.0)
+            return _obj(s, Ne, data, prior, alpha=0.0, beta=0.0)
 
         opt = jaxopt.ProjectedGradient(
             fun=_eb_loss,
             projection=jaxopt.projection.projection_box,
             tol=0.1,
             implicit_diff=False,
-            unroll=True,
-            jit=True,
+            # unroll=True,
+            # jit=False,
         )
         self._eb_opt = jit(opt.run)
-        opt = jaxopt.ProximalGradient(
+
+        opt = jaxopt.ProjectedGradient(
             fun=_obj,
-            prox=_prox_nuclear_norm,
+            projection=jaxopt.projection.projection_box,
             implicit_diff=False,
-            # unroll=False,
-            # jit=True,
+            # unroll=True,
+            # jit=False,
             tol=0.1,
         ).run
         self._ll_opt = jit(opt)
@@ -106,14 +107,10 @@ class _Optimizer:
         return ab, _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, alpha, beta, gamma, Ne, data, prior):
-        f, df = obj(s0, Ne, data, prior, alpha, beta, 1.0)
-        C = (
-            abs(df).max() / 0.1
-        )  # scale so that a stepsize of 1 results in a change of at most |0.2| in s
+        bounds = (jnp.full_like(s0, -0.2), jnp.full_like(s0, 0.2))
         res = self._ll_opt(
             s0,
-            hyperparams_prox=gamma,
-            C=C,
+            hyperparams_proj=bounds,
             alpha=alpha,
             beta=beta,
             Ne=Ne,
