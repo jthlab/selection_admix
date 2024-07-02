@@ -1,7 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py:light
+#     formats: ipynb,py
 #     text_representation:
 #       extension: .py
 #       format_name: light
@@ -14,16 +14,15 @@
 # ---
 
 # +
-import logging
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
 import logging
 import jax
 from math import log, exp, sqrt
-
 
 from bmws import Observation, sim_and_fit, sim_wf
 from bmws.betamix import forward, BetaMixture
@@ -33,36 +32,8 @@ from bmws.sim import sim_admix
 rng = np.random.default_rng()
 
 
-# +
-#This block is just reading in the data, sorry it's a bit gross 
-
-#Load EAS data
-admixture_proportions=pd.read_csv("admixture_proportions.txt", sep="\t")
-admixture_proportions["generation"]=[int(x) for x in round(admixture_proportions["Date"]/30)]
-admixture_proportions=admixture_proportions[(admixture_proportions['Date'] <=10000)]
-
-#merge allele counts 
-counts=pd.read_csv("snp_acs.raw", sep="\t")
-data=pd.merge(admixture_proportions, counts, on="IID")
-
-#Spread present-day samples randomly over last 10 generations, for computational efficiency. 
-for i in range(data.shape[0]):
-    if data.iloc[i, data.columns.get_loc('generation')]==0:
-        data.iloc[i, data.columns.get_loc('generation')]=rng.choice(10)
-
-#Parameters for data matrices
-T=max(data["generation"])+1
-N=max(data["generation"].value_counts().values)
-
-#Which SNP to look at
-snp="rs7925299_C(/G)"
-
-#Create data matrices
-obs = np.zeros([T, N, 2], dtype=int)
-samples = np.zeros([T, N], dtype=int)
-#thetas = np.zeros([T, N, 3], dtype=float)
-thetas = rng.dirichlet(np.ones(3), [T, N])
 # -
+
 
 # # New data format
 #
@@ -75,26 +46,7 @@ thetas = rng.dirichlet(np.ones(3), [T, N])
 #     }
 #     
 # (For diploid data, $n=2$, while for pseuodhaploid data $n=1$)
-
-# +
-#Fill in data matrices (in simplest way possible) - generation, N
-records = []
-
-for gen, count in data["generation"].value_counts().items():
-    this_data=data[data["generation"]==gen]
-    M=this_data.shape[0]
-    for i in range(M):
-        if not this_data[snp].isna().iloc[i]:
-            rec = {'t': gen}
-            rec['obs'] = (1, int(this_data[snp].values[i] / 2))
-            rec['theta'] = [this_data["North"].iloc[i], 
-                            this_data["South"].iloc[i]]
-            rec['theta'].append(1 - sum(rec['theta']))
-            records.append(rec)
-# -
-
-data = Dataset.from_records(records)
-
+#
 # ## New objective function
 # Additional regularization terms have been added. The estimand $\mathbf{s}\in\mathbb{R}^{T\times K}$ is now a matrix with $T$ rows (time points) and $K$ columns/populations. The new objective function is:
 #
@@ -112,27 +64,99 @@ data = Dataset.from_records(records)
 # $\beta$ and $\gamma$ sort of aim at the same goal, we'll need to experiment to see which makes more sense.
 
 # +
-#Run analysis - no longer fails!
-em_iterations=1
-M=100
-Ne=np.full([data.T, data.K], 1e4)
-Ne_fit=Ne
-s = np.zeros([data.T, data.K])
-ab = np.ones([2, data.K]) + 1e-4
-estimate_kwargs={"alpha": 0, "beta": 0, "gamma": 1e-4}
 
-with jax.debug_nans(True):
-    for i in range(em_iterations):
-        logger.info("EM iteration %d", i)
-        ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
-        logger.info("ab: %s", ab)
-        s = estimate(data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
-        logger.info("s: %s", s)
+#Load data
+def read_data(pop):
 
-betas, _ = forward(s, Ne, data, prior)
+    admixture_proportions=pd.read_csv("data/"+pop+"_sample_info.txt", sep="\t")
+    admixture_proportions["generation"]=[int(x) for x in round(admixture_proportions["Date"]/30)]
+    admixture_proportions=admixture_proportions[(admixture_proportions['Date'] <=10000)]
+
+    #merge allele counts 
+    counts=pd.read_csv("data/"+pop+"_snp_acs.raw", sep=" ")
+    snps=list(counts.columns)[6:]
+    data=pd.merge(admixture_proportions, counts, on="IID")
+
+    #Parameters for data matrices
+    T=max(data["generation"])+1
+    N=max(data["generation"].value_counts().values)
+    K=admixture_proportions.shape[1]-7
+    datasets=[]
+    for snp in snps:
+        records = []
+        for gen, count in data["generation"].value_counts().items():
+            this_data=data[data["generation"]==gen]
+            M=this_data.shape[0]
+            for i in range(M):
+                if not this_data[snp].isna().iloc[i]:
+                    rec = {'t': gen}
+                    rec['obs'] = (1, int(this_data[snp].values[i] / 2))
+                    rec['theta'] = [this_data["k"+str(k+1)].iloc[i] for k in range(K-1)]
+                    rec['theta'].append(1 - sum(rec['theta']))
+                    records.append(rec)
+        
+        datasets.append(Dataset.from_records(records))
+        
+    return datasets, snps
+
+
 # -
 
-plt.plot(s[:, 0], color="tab:blue", alpha=1)
-plt.plot(s[:, 1], color="tab:orange", alpha=1)
-plt.plot(s[:, 2], color="tab:green", alpha=1)
-plt.xscale('log')
+#Run analysis - no longer fails!
+def run_analysis(data, alpha=1e4, beta=1e4, gamma=0, em_iterations=3):
+    M=100
+    Ne=np.full([data.T, data.K], 1e4)
+    Ne_fit=Ne
+    s = np.zeros([data.T, data.K])
+    ab = np.ones([2, data.K]) + 1e-4
+    estimate_kwargs={"alpha": alpha, "beta": beta, "gamma": gamma}
+
+    with jax.debug_nans(True):
+        for i in range(em_iterations):
+            logger.info("EM iteration {}", i)
+            ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
+            logger.info("ab: {}", ab)
+            s = estimate(data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
+            logger.info("s: {}", s)
+
+    return s
+
+
+# +
+#Run for all SNPs
+
+#for pop in ["eas", "eur", "sam"]:
+#    datasets, snps=read_data(pop)
+#    for data,snp in zip(datasets, snps): 
+#        try:
+#            s=run_analysis(data)
+#            plt.figure()
+#            plt.plot(s[:, 0], color="tab:blue", alpha=1)
+#            plt.plot(s[:, 1], color="tab:orange", alpha=1)
+#            plt.plot(s[:, 2], color="tab:green", alpha=1)
+#            plt.title(pop+": "+snp)
+#            plt.show()
+#        except:
+#            print("Error: "+ snp)
+# -
+
+#Example that fails
+pop="eas"
+snp="rs174548_C(/G)"
+datasets, snps=read_data(pop)
+data=datasets[snps.index(snp)]
+with jax.log_compiles(True):
+    s = run_analysis(data)
+
+#Example that runs but looks weird (but still get an error if set >1 EM iterations)
+pop="eas"
+snp="rs17843625_G(/A)"
+datasets, snps=read_data(pop)
+data=datasets[snps.index(snp)]
+s=run_analysis(data, alpha=1e4, beta=1e2, em_iterations=3)
+fig, axs = plt.subplots(ncols=2, nrows=1)
+axs[0].plot(s[:, 0], color="tab:blue", alpha=1)
+axs[0].plot(s[:, 1], color="tab:orange", alpha=1)
+axs[0].plot(s[:, 2], color="tab:green", alpha=1)
+a,b=[int(y) for x,y in zip(data.obs, data.t) if x[0]>0],[int(x[1]) for x,y in zip(data.obs, data.t) if x[0]>0]
+sns.regplot(x=a, y=b, logistic=True, ax=axs[1])
