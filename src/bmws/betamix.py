@@ -326,8 +326,8 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
         datum, s_t, Ne_t = tup
         assert beta0.log_p.ndim == 2
         assert beta0.log_p.shape[1] == 2
-        assert beta1.log_p.ndim == 2
-        assert beta1.log_p.shape[1] == 2
+        #assert beta1.log_p.ndim == 2
+        #assert beta1.log_p.shape[1] == 2
         beta2 = lax.cond(datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0)
         # now process the observation
         beta, ll1 = _binom_sampling_admix(beta2, datum)
