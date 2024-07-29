@@ -197,7 +197,7 @@ class SpikedBeta(NamedTuple):
         # = logsumexp(0, log_p) = log1p(-exp(log_p).sum())
         assert self.log_p.shape == (2,)
         r = -jnp.expm1(jnp.logaddexp(self.log_p[0], self.log_p[1]))
-        r = r.clip(1e-8, 1. - 1e-8)
+        r = r.clip(1e-8, 1.0 - 1e-8)
         return jnp.log(r)
 
     @property
@@ -240,8 +240,6 @@ def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
     return ret
 
 
-
-
 def _binom_sampling(n, d, f: SpikedBeta):
     log_p, (a, b, log_c) = f
     assert log_p.shape == (2,)
@@ -251,7 +249,7 @@ def _binom_sampling(n, d, f: SpikedBeta):
     # probability of the data given each mixing component
     log_p_mix = betaln(a1, b1) - betaln(a, b) + _logbinom(n, d)
     log_p01 = log_c + log_p_mix
-    lp = log_p + jnp.where(d == jnp.array([0, n]), -100., 0.)
+    lp = log_p + jnp.where((n > 0) & (d == jnp.array([0, n])), -100.0, 0.0)
     log_c1 = log_r + log_p01
     ll = logsumexp(jnp.concatenate([lp, log_c1]))
     # p(p=1|d) = p(d|p=1)*p01 / p(d)
@@ -326,15 +324,24 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
         datum, s_t, Ne_t = tup
         assert beta0.log_p.ndim == 2
         assert beta0.log_p.shape[1] == 2
-        #assert beta1.log_p.ndim == 2
-        #assert beta1.log_p.shape[1] == 2
-        beta2 = lax.cond(datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0)
+        # assert beta1.log_p.ndim == 2
+        # assert beta1.log_p.shape[1] == 2
+        beta2 = lax.cond(
+            datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0
+        )
         # now process the observation
-        beta, ll1 = _binom_sampling_admix(beta2, datum)
+        n, d = datum.obs
+        beta, ll1 = lax.cond(
+            n > 0,
+            _binom_sampling_admix,
+            lambda _, __: (beta2, 0.0),  # no update
+            beta2,
+            datum,
+        )
         ll = ll0 + ll1
         return (beta, ll, datum.t), beta
 
-    ninf = jnp.full([data.K, 2], -100.)
+    ninf = jnp.full([data.K, 2], -100.0)
     pr = SpikedBeta(ninf, beta)
     data0 = jax.tree.map(lambda x: x[0], data)
     beta0, ll0 = _binom_sampling_admix(pr, data0)
@@ -356,11 +363,7 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
         data1 = jax.tree.map(lambda x: x[1:], data)
         s_t = s[data1.t]
         Ne_t = Ne[data1.t]
-        (_, ll, _), betas = lax.scan(
-            _f,
-            (beta0, ll0, data.t[0]),
-            (data1, s_t, Ne_t)
-        )
+        (_, ll, _), betas = lax.scan(_f, (beta0, ll0, data.t[0]), (data1, s_t, Ne_t))
 
     return (betas, beta0), ll
 

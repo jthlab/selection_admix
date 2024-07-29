@@ -60,3 +60,21 @@ def test_admix_sampling_no_obs(beta, dataset, K):
 def test_forward(dataset, s, Ne, K):
     beta0 = vmap(lambda _: BetaMixture.uniform(32))(jnp.arange(K))
     beta, ll = forward(s, Ne, dataset, beta0)
+
+def test_no_sampling_admix(beta, K):
+    '''Test that the binomial sampling with and without admixture are the same when there is only one population'''
+    datum = Dataset(**{'t': 10, 'theta': np.eye(K)[0], 'obs': [0, 0]})
+    beta1, _ = _binom_sampling_admix(beta, datum)
+    np.testing.assert_allclose(beta1.log_p, beta.log_p)
+
+def test_equal_binom_sampling_admix_noadmix(beta, K, rng):
+    '''Test that the binomial sampling with and without admixture are the same when there is only one population'''
+    datum = Dataset(**{'t': 10, 'theta': np.eye(K)[0], 'obs': [0, 0]})
+    beta0 = jax.tree_map(lambda a: a[0], beta)
+    beta1, ll1 = _binom_sampling(0, 0, beta0)
+    beta2, ll2 = _binom_sampling_admix(beta, datum)
+    np.testing.assert_allclose(ll1, ll2)
+    for x in rng.uniform(0, 1, 10):
+        y1 = beta1.f_x(x)
+        y2 = vmap(BetaMixture.__call__, (0, None))(beta2.f_x, x)
+        np.testing.assert_allclose(y1, y2)
