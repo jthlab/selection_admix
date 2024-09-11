@@ -1,4 +1,3 @@
-import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Union
@@ -13,18 +12,11 @@ from jax import numpy as jnp
 from jax import value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
 from jax.scipy.special import betaln, xlog1py, xlogy
+from loguru import logger
 from scipy.optimize import minimize
 
-from bmws.betamix import (
-    BetaMixture,
-    Dataset,
-    SpikedBeta,
-    _construct_prior,
-    forward,
-    loglik,
-)
-
-logger = logging.getLogger(__name__)
+from bmws.betamix import BetaMixture, SpikedBeta, _construct_prior, forward, loglik
+from bmws.data import Dataset
 
 
 def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
@@ -40,9 +32,11 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
 def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
     # s: [T, K]
     ll = loglik(s, Ne, data, prior)
+    temporal_diff = jnp.sum(jnp.diff(s, axis=0) ** 2)
     pairwise_diff = 0.5 * jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
-    ret = -ll + alpha * (jnp.diff(s, axis=0) ** 2).sum() + beta * pairwise_diff
+    ret = -ll + alpha * temporal_diff + beta * pairwise_diff
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
+    # jax.debug.print('ll:{} td:{} pd:{}', ll, temporal_diff, pairwise_diff)
     return ret
 
 
@@ -61,7 +55,7 @@ def _beta_pdf(x, a, b):
 
 @partial(vmap, in_axes=(0, 0, None))
 def _interp(a, b, M) -> BetaMixture:
-    return BetaMixture.interpolate(lambda x: _beta_pdf(x, a, b), M, norm=True, z01=True)
+    return BetaMixture.interpolate(lambda x: _beta_pdf(x, a, b), M, norm=True)
 
 
 @dataclass
@@ -71,21 +65,33 @@ class _Optimizer:
     M: int
 
     def __post_init__(self):
-        def _eb_loss(ab, s, Ne, data):
+        def _eb_loss(ab, s, Ne, data, alpha, beta):
             # ab: [2, K]
             a, b = ab
             prior = _interp(a, b, self.M)
-            return _obj(s, Ne, data, prior, alpha=0.0, beta=0.0)
+            # prior = jax.vmap(lambda _: prior)(jnp.arange(data.K))
+            ret = _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
+            # jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
+            return ret
 
-        opt = jaxopt.ProjectedGradient(
+        # opt = jaxopt.ProjectedGradient(
+        #     fun=_eb_loss,
+        #     projection=jaxopt.projection.projection_box,
+        #     tol=0.1,
+        #     implicit_diff=False,
+        #     # unroll=True,
+        #     # jit=False,
+        # )
+        # self._eb_opt = jit(opt.run)
+        opt = jaxopt.ScipyBoundedMinimize(
             fun=_eb_loss,
-            projection=jaxopt.projection.projection_box,
-            tol=0.1,
-            implicit_diff=False,
-            # unroll=True,
-            # jit=False,
         )
-        self._eb_opt = jit(opt.run)
+
+        #     projection=jaxopt.projection.projection_box,
+        #     tol=0.1,
+        #     implicit_diff=False,
+
+        self._eb_opt = opt.run
 
         opt = jaxopt.ProjectedGradient(
             fun=_obj,
@@ -94,15 +100,24 @@ class _Optimizer:
             # unroll=True,
             # jit=False,
             tol=0.1,
-        ).run
-        self._ll_opt = jit(opt)
+        )
+        opt = jaxopt.ScipyBoundedMinimize(
+            fun=_obj,
+        )
+        # self._ll_opt = jit(opt.run)
+        self._ll_opt = opt.run
 
-    def run_eb(self, ab0, s, Ne, data):
+    def run_eb(self, ab0, s, Ne, data, alpha, beta):
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
         ub = jnp.full_like(ab0, 100.0)
         bounds = (lb, ub)
-        res = self._eb_opt(ab0, hyperparams_proj=bounds, s=s, Ne=Ne, data=data)
+        res = self._eb_opt(
+            ab0, bounds=bounds, s=s, Ne=Ne, data=data, alpha=alpha, beta=beta
+        )
+        logger.debug("eb result: {}", res)
         ab = a_star, b_star = res.params
+        # a_star = vmap(lambda _: a_star)(jnp.arange(data.K))
+        # b_star = vmap(lambda _: b_star)(jnp.arange(data.K))
         # a_star, b_star = res
         return ab, _interp(a_star, b_star, self.M)
 
@@ -110,13 +125,14 @@ class _Optimizer:
         bounds = (jnp.full_like(s0, -0.2), jnp.full_like(s0, 0.2))
         res = self._ll_opt(
             s0,
-            hyperparams_proj=bounds,
+            bounds=bounds,
             alpha=alpha,
             beta=beta,
             Ne=Ne,
             data=data,
             prior=prior,
         )
+        logger.debug("MLE result: {}", res)
         return res.params
 
     @classmethod
@@ -127,11 +143,11 @@ class _Optimizer:
 
 
 def empirical_bayes(
-    ab0, s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0
+    ab0, s, data: Dataset, Ne, M, num_steps=100, learning_rate=1.0, alpha=1.0, beta=1.0
 ) -> BetaMixture:
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
-    return opt.run_eb(ab0, s, Ne, data)
+    return opt.run_eb(ab0, s, Ne, data, alpha=alpha, beta=beta)
 
 
 @partial(jit, static_argnums=5)
@@ -202,71 +218,100 @@ def _prep_data(data):
     return np.array(Ne), obs, times
 
 
-@partial(jit, static_argnums=(3, 4))
 def sample_paths(
     s: np.ndarray,
     Ne: np.ndarray,
-    obs: np.ndarray,
-    k: int,
+    data: Dataset,
+    prior: BetaMixture,
+    k: int = 1,
     seed: int = 1,
-    prior: Union[int, BetaMixture] = BetaMixture.uniform(100),
 ):
     """
     Sample allele frequency paths from posterior distribution.
 
     Args:
-        s: selection coefficient at each time point (T - 1,)
-        Ne:  diploid effective population size at each time point (T - 1,)
-        obs: (sample size, # derived alleles) observed at each time point (T, 2)
+        s: selection coefficient at each time point (T - 1, K)
+        Ne:  diploid effective population size at each time point (T - 1, K)
+        data: Dataset object
+        prior: prior on initial allele frequency
         k: number of paths to sample
         seed: seed for random number generator
-        prior: prior on initial allele frequency
 
     Returns:
         Array of shape (k, T), containing k samples from the allele frequency posterior.
 
     Notes:
-        - obs[0] denotes the most recent observation; obs[-1] is the most ancient.
         - s and Ne control the Wright-Fisher transitions that occur *between* each time points.
           Therefore, there they have one less entry than the number of observations.
     """
-    rng = jax.random.PRNGKey(seed)
+    keys = jax.random.split(jax.random.PRNGKey(seed), k)
 
-    prior = _construct_prior(prior)
+    def f(key):
+        return _sample_path(s, Ne, data, prior, key)
 
-    def _sample_spikebeta(beta: SpikedBeta, rng, cond):
-        # -1, M represent the special fixed states 0/1
-        log_p0p = beta.log_p0 + jnp.log(cond != -1)
-        log_p1p = beta.log_p1 + jnp.log(cond != -2)
-        log_p = jnp.concatenate(
-            [log_p0p[None], log_p1p[None], beta.log_r + beta.f_x.log_c]
-        )
-        sub1, sub2 = jax.random.split(rng)
-        s = jax.random.categorical(sub1, log_p) - 2
-        x = jnp.where(
-            s < 0,
-            jnp.take(jnp.array([0.0, 1.0]), 2 + s),
-            jax.random.beta(sub2, beta.f_x.a[s], beta.f_x.b[s]),
-        )
-        return (s, x)
+    return jax.vmap(f)(keys)
 
-    (betas, beta_n), _ = forward(s, Ne, obs, prior)
 
-    beta0 = jax.tree.map(lambda a: a[0], betas)
-    beta1n = jax.tree.map(lambda a, b: jnp.concatenate([a[1:], b[None]]), betas, beta_n)
-    betas = jax.tree.map(lambda a, b: jnp.concatenate([a, b[None]]), betas, beta_n)
+def _sample_path(
+    s: np.ndarray,
+    Ne: np.ndarray,
+    data: Dataset,
+    prior: BetaMixture,
+    key,
+):
+    def f(accum, seq):
+        key, x_i1, Ne_i1, beta_i1 = accum
+        beta_i, Ne_i, s_i, i = seq
+        # sampling
+        k = x_i1 * Ne_i1
+        N = Ne_i1
+        # sample from pdf which is proportional to beta_i(x) * p(x_i1 | x_i = x)
+        # we have p(x_i1 | x_i = x) = binom(N_i1 * x_i1; N_i1; f(x)) \propto f(x)^k (1-f(x))^(Ni1-k)
+        # where f(x) is the selectino operator.
+        # if s=0 then f(x)=x so the target density is just proportional to a beta mixture
+        f_x_star = beta_i.f_x._replace(a=beta_i.f_x.a + k, b=beta_i.f_x.b + Ne_i1 - k)
+        beta_star = beta_i._replace(f_x=f_x_star)
 
-    def _f(tup, beta):
-        rng, s1 = tup
-        rng, sub1, sub2 = jax.random.split(rng, 3)
-        s, x = _sample_spikebeta(beta, sub1, s1)
-        return (rng, s), x
+        def log_pi(x):
+            y = (1 + s_i / 2) * x / (1 + s_i / 2 * x)
+            return beta_i(x, log=True) + xlogy(k, y) + xlog1py(Ne_i1 - k, -y)
 
-    def _g(rng, _):
-        rng, sub = jax.random.split(rng)
-        s0, x0 = _sample_spikebeta(beta0, sub, 0)
-        _, xs = jax.lax.scan(_f, (sub, s0), beta1n)
-        return rng, jnp.concatenate([x0[None], xs])
+        log_q = partial(beta_i, log=True)
 
-    _, ret = jax.lax.scan(_g, rng, None, length=k)
-    return ret, betas
+        def mh(_, tup):
+            x_t, key, a = tup
+            keys = jax.random.split(key, 3)
+            x_prime = beta_star.sample(keys[0])
+            log_alpha = log_pi(x_prime) - log_pi(x_t) + log_q(x_t) - log_q(x_prime)
+            # U < alpha => log(u) < log_alpha => exp(1) > -log(alpha)
+            accept = jax.random.exponential(keys[1]) > -log_alpha
+            x_t1 = jnp.where(accept, x_prime, x_t)
+            return (x_t1, keys[2], a + accept)
+
+        keys = jax.random.split(key, 3)
+        init = (beta_i.sample(keys[0]), keys[1], 0)
+        x, _, a = lax.fori_loop(0, 100, mh, init)
+        # jax.debug.print("x1:{} x:{} Ne_i:{} s_i:{} i:{} a:{}", x_i1, x, Ne_i, s_i, i, a)
+        return (keys[2], x, Ne_i, beta_i), x
+
+    betas, _ = forward(s, Ne, data, prior)
+    mask = jnp.append(data.t[1:] != data.t[:-1], True)
+    t = data.t[mask]
+    betas = jax.tree.map(lambda a: a[mask], betas)
+    # the betas will be updated after each observation, but we only care about the
+    # posterior at each distinct time point. thin the betas to only give the posterior
+    # at each transition.
+    beta_last, betas = [
+        jax.tree.map(lambda a: a[sl], betas) for sl in (-1, slice(None, -1))
+    ]
+
+    def sample_beta(beta0, betas, Ne, s):
+        keys = jax.random.split(key, 2)
+        x0 = beta0.sample(keys[0])
+        init = (keys[1], x0, Ne[t[-1]], beta0)
+        seq = (betas, Ne[t[:-1]], s[t[:-1]], jnp.arange(len(t) - 1))
+        _, samples = lax.scan(f, init, seq, reverse=True)
+        return samples
+
+    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1))(beta_last, betas, Ne, s)
+    return samples
