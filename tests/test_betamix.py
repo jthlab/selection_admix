@@ -1,3 +1,4 @@
+from functools import partial
 import numpy as np
 import jax
 from jax import jit, vmap
@@ -32,6 +33,11 @@ def s(K):
 @fixture
 def Ne(K):
     return np.full([10, K], 100.0)
+
+
+def test_interp():
+    f = partial(jax.scipy.stats.beta.pdf, a=1, b=1)
+    b = BetaMixture.interpolate(f, 32, (0.3, 0.45))
 
 def test_sampling_no_obs(beta):
     beta = jax.tree_map(lambda a: a[0], beta)
@@ -78,3 +84,24 @@ def test_equal_binom_sampling_admix_noadmix(beta, K, rng):
         y1 = beta1.f_x(x)
         y2 = vmap(BetaMixture.__call__, (0, None))(beta2.f_x, x)
         np.testing.assert_allclose(y1, y2)
+
+
+        
+
+def test_dataset_forward():
+    ds = Dataset.from_records([
+        dict(t=20, theta=np.array([.1, .3, .6]), obs=(1, 1)),
+        dict(t=18, theta=np.array([1., 0., 0.]), obs=(1, 0)),
+        dict(t=10, theta=np.array([.5, 0., .5]), obs=(1, 1)),
+        dict(t=2, theta=np.array([.5, .2, .3]), obs=(10, 5)),
+        dict(t=0, theta=np.array([.2, .2, .6]), obs=(3, 0)),
+        ]
+    )
+    s = np.zeros([21, 3])
+    Ne = np.full_like(s, 1e4)
+    data = ds
+    pi = jax.vmap(lambda _: BetaMixture.uniform(20))(jnp.arange(3))
+    res = forward(s, Ne, data, pi)
+    breakpoint()
+    print(res)
+
