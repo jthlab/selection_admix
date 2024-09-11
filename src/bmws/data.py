@@ -25,7 +25,7 @@ class Dataset(NamedTuple):
     @property
     def T(self):
         "The length of the time series"
-        return self.t[0]
+        return self.t[0] + 1
 
     @classmethod
     def from_records(cls, records: list[dict]):

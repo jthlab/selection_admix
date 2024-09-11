@@ -126,25 +126,31 @@ class BetaMixture(NamedTuple):
         return cls.interpolate(lambda x: 1.0, M, norm=True)
 
     @classmethod
-    def interpolate(cls, f, M, norm=False, z01=True) -> "BetaMixture":
+    def interpolate(cls, f, M, interval=(0.0, 1.0), norm=False) -> "BetaMixture":
         # bernstein polynomial basis:
         # sum_{i=0}^(M) f(i/M) binom(M,i) x^i (1-x)^(M-i)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) x^(i-1) (1-x)^(M-i+2-1)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) * beta(i,M-i+2) x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
         #   = sum_{i=1}^(M+1) f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
-        a = 1 + z01 - 1
-        b = M + 2 - z01 - 1
-        i = jnp.arange(1, M + 2, dtype=float)
-        c = vmap(f)((i[a:b] - 1) / M) / (1 + M)
-        if z01:
-            z = jnp.zeros(1)
-            c = jnp.concatenate([z, c, z])
+        #   we assume that f(0) = f(1) = 0 hence
+        #   = sum_{i=2}^M f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
+        # slice up interval into M chunks
+        u, v = interval
+        # slice up the interval into M slices
+        delta = (v - u) / M
+        Q = jnp.ceil(1 / delta)
+        # M + 2 because we assume that f(0)=f(1)=0, so those first and last slices don't count
+        Q = jnp.maximum(Q, M + 2)
+        # assume f is zero outside of (u, v), so find the index i0 such that (u, v) \in [i0 / Q, (i0 + 1) / Q, ..., (i0 + M - 1) / Q]
+        i0 = jnp.floor(u * Q).clip(2)
+        i = i0 + jnp.arange(M)
+        c = vmap(f)((i - 1) / Q) / (1 + Q)
         c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
         c_safe = jnp.where(c0, 1.0, c)
         log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
         if norm:
             log_c -= logsumexp(log_c)
-        return cls(a=i, b=M - i + 2, log_c=log_c)
+        return cls(a=i, b=Q - i + 2, log_c=log_c)
 
     @property
     def M(self):
@@ -157,15 +163,26 @@ class BetaMixture(NamedTuple):
         b = self.b
         EX = a / (a + b)  # EX
         EX2 = a * (a + 1) / (a + b) / (1 + a + b)  # EX2
-        return jnp.array([EX, EX2 - EX**2])
+        return jnp.array([EX, EX2])
 
-    def __call__(self, x):
-        return jnp.exp(
+    @property
+    def mean(self):
+        return self.moments[0].dot(self.c)
+
+    @property
+    def var(self):
+        return self.moments[1].dot(self.c) - self.mean**2
+
+    def __call__(self, x, log=False):
+        ret = logsumexp(
             self.log_c
             + xlogy(self.a - 1, x)
             + xlog1py(self.b - 1, -x)
             - betaln(self.a, self.b)
-        ).sum()
+        )
+        if not log:
+            ret = jnp.exp(ret)
+        return ret
 
     def plot(self, K=100, ax=None) -> None:
         if ax is None:
@@ -182,23 +199,53 @@ class SpikedBeta(NamedTuple):
     log_p: jnp.ndarray  # spikes at 0 and 1
     f_x: BetaMixture  # abs. continuous component
 
-    def sample_component(self, rng):
-        sub1, sub2, sub3 = jax.random.split(rng, 4)
-        i = jax.random.categorical(sub1, self.f_x.log_c)
-        p = jax.random.beta(sub2, self.f_x.a[i], self.f_x.b[i])
-        q = jnp.concatenate([self.log_p, self.log_r[None]])
-        j = jax.random.categorical(sub3, q)
-        return jnp.array([0.0, 1.0, p])[j]
+    def sample(self, key: jax.random.PRNGKey):
+        keys = jax.random.split(key, 3)
+        i = jax.random.categorical(keys[0], self.f_x.log_c)
+        f = jax.random.beta(keys[1], self.f_x.a[i], self.f_x.b[i])
+        a = jnp.array([0.0, 1.0, f])
+        p = jnp.exp(self.log_p)
+        p = jnp.append(p, 1 - p.sum())
+        return jax.random.choice(keys[2], a, p=p)
+
+    def __call__(self, x, log: bool = False):
+        ret = jnp.select(
+            [jnp.isclose(x, 0.0), jnp.isclose(x, 1.0)],
+            [self.log_p[0], self.log_p[1]],
+            self.log_r + self.f_x(x, log),
+        )
+        if not log:
+            ret = jnp.exp(ret)
+        return ret
+
+    # def mean(self):
+    #     p = self.p
+    #     return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[0]
+
+    # def EX2(self):
+    #     p = self.p
+    #     return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[1]
+
+    # def var(self):
+    #     return self.EX2() - self.mean()**2
 
     @property
-    def log_r(self):
+    def p(self):
+        return jnp.exp(self.log_p)
+
+    @property
+    def r(self):
         # the probability of the absolutely continuous component
         # log(1 - exp(log_p).sum()) = log(1 - sum(exp(log_p)))
         # = logsumexp(0, log_p) = log1p(-exp(log_p).sum())
         assert self.log_p.shape == (2,)
         r = -jnp.expm1(jnp.logaddexp(self.log_p[0], self.log_p[1]))
         r = r.clip(1e-8, 1.0 - 1e-8)
-        return jnp.log(r)
+        return r
+
+    @property
+    def log_r(self):
+        return jnp.log(self.r)
 
     @property
     def M(self):
@@ -215,9 +262,7 @@ class SpikedBeta(NamedTuple):
 
 def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
     """Given a prior distribution on population allele frequency, compute posterior after
-    observing data at dt generations in the future"""
-    # var(X') = E var(X'|X) + var E(X' | X)
-    #         ~= var(X'|X = EX) + var E(X' | X)
+    one round of WF mating."""
 
     @partial(vmap, in_axes=(0, 0, 0))
     def lp(fi, si, Nei):
@@ -226,7 +271,7 @@ def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
         assert log_p.shape == (2,)
         log_r = fi.log_r
         x = jnp.array([0, Nei])[:, None]  # [2, 1]
-        # probability mass for fixation. p(beta=0) = p0 + (1-p0) * \int_0^1 f(x) (1-x)^n, and similarly for p1
+        # probability mass for fixation. p(af=0) = p0 + (1-p0-p1) * \int_0^1 f(x) (1-x)^n, and similarly for p1
         log_p_c = log_r + logsumexp(
             log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
         )  # [2] probability of loss or fixation in continuous component
@@ -246,20 +291,22 @@ def _binom_sampling(n, d, f: SpikedBeta):
     log_r = f.log_r
     a1 = a + d
     b1 = b + n - d
-    # probability of the data given each mixing component
-    log_p_mix = betaln(a1, b1) - betaln(a, b) + _logbinom(n, d)
-    log_p01 = log_c + log_p_mix
-    lp = log_p + jnp.where((n > 0) & (d == jnp.array([0, n])), -100.0, 0.0)
-    log_c1 = log_r + log_p01
-    ll = logsumexp(jnp.concatenate([lp, log_c1]))
-    # p(p=1|d) = p(d|p=1)*p01 / p(d)
-    log_p = lp - ll
-    # update mixing coeffs
-    # p(c | data) = p(data | c) * p(c) / p(data)
-    log_c1 -= logsumexp(log_c1)
+    # probability of the data given the absolutely continuous component
+    log_p_data_comp_cont = log_c + betaln(a1, b1) - betaln(a, b) + _logbinom(n, d)
+    log_p_data_cont = logsumexp(log_p_data_comp_cont)
+    # probability of the data given the spike components
+    log_p_data_spike = jnp.where((n > 0) & (d == jnp.array([0, n])), 0.0, -100)
+    # overall probability of the data
+    ll = jnp.logaddexp(log_r + log_p_data_cont, logsumexp(log_p + log_p_data_spike))
+    # probability of spikes given data: p(spike | data) =
+    # p(data | spike) p(spike) / p(data)
+    log_p1 = log_p_data_spike + log_p - ll
+    # probability of mixing components given data:
+    # p(comp | data, cont) = p(data | comp, cont) * p(comp | cont) / p(data | cont)
+    log_c1 = log_p_data_comp_cont - log_p_data_cont
     # posterior after binomial sampling --
     # clip to avoid numerical issues -- if p0/p1 ~= 1 then the model becomes degenerate
-    beta = SpikedBeta(log_p, BetaMixture(a1, b1, log_c1))
+    beta = SpikedBeta(log_p1, BetaMixture(a1, b1, log_c1))
     return beta, ll
 
 
@@ -285,20 +332,33 @@ def _binom_sampling_admix(fs: SpikedBeta, datum: Dataset) -> Tuple[SpikedBeta, f
         log_c1 = jnp.concatenate(
             [lt[0] + beta0.f_x.log_c, lt[1] + beta1.f_x.log_c]
         )  # [2 * M]
+        # since n=1, d is either 0 or 1:
+        # if d = 0 then a1 = [a, a] and b1 = [b, b+1] with
+        # log_c1 = [log_c0, log_c1] + log_p_mix
         a1 = jnp.concatenate([beta0.f_x.a, beta1.f_x.a])
         b1 = jnp.concatenate([beta0.f_x.b, beta1.f_x.b])
         # approximate the mixture on 2*M components
         bm0 = BetaMixture(a1, b1, log_c1)
+        # jax.debug.print("mean(bm0):{} sd(bm0):{}", bm0.mean, jnp.sqrt(bm0.var))
         if True:
             bm = bm0.top_k(M)
         else:
-            bm = BetaMixture.interpolate(bm0, 100 * M, norm=True).top_k(M)
+            mean = bm0.mean
+            var = bm0.var
+            sd = jnp.sqrt(var)
+            u = jnp.maximum(0.0, mean - 3 * sd)
+            v = jnp.minimum(1.0, mean + 3 * sd)
+            bm = BetaMixture.interpolate(bm0, M, norm=True, interval=(u, v))
         # now update the spike probabilities
         log_p1 = _clip_lp(jnp.logaddexp(lt[0] + beta0.log_p, lt[1] + beta1.log_p))
         return SpikedBeta(log_p1, bm)
 
     fs2 = vmap(_combine, (0, 0, 0))(datum.theta, fs0, fs1)
     return fs2, ll
+
+
+def _tree_where(cond, a, b):
+    return jax.tree.map(partial(jnp.where, cond), a, b)
 
 
 # @partial(jit, static_argnums=3)
@@ -319,6 +379,7 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
     T, K = Ne.shape
     assert s.shape == Ne.shape == (T, K)
 
+    # @jax.remat
     def _f(accum, tup):
         beta0, ll0, last_t = accum
         datum, s_t, Ne_t = tup
@@ -326,25 +387,20 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
         assert beta0.log_p.shape[1] == 2
         # assert beta1.log_p.ndim == 2
         # assert beta1.log_p.shape[1] == 2
-        beta2 = lax.cond(
-            datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0
-        )
+        # beta2 = lax.cond(
+        #     datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0
+        # )
+        beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne_t), beta0)
         # now process the observation
         n, d = datum.obs
-        beta, ll1 = lax.cond(
-            n > 0,
-            _binom_sampling_admix,
-            lambda _, __: (beta2, 0.0),  # no update
-            beta2,
-            datum,
+        beta2, ll1 = _tree_where(
+            n > 0, _binom_sampling_admix(beta1, datum), (beta1, 0.0)
         )
         ll = ll0 + ll1
-        return (beta, ll, datum.t), beta
+        return (beta2, ll, datum.t), beta2
 
     ninf = jnp.full([data.K, 2], -100.0)
-    pr = SpikedBeta(ninf, beta)
-    data0 = jax.tree.map(lambda x: x[0], data)
-    beta0, ll0 = _binom_sampling_admix(pr, data0)
+    beta0 = SpikedBeta(ninf, beta)
 
     if False:
         logger.warning("Compiling unrolled forward loop!")
@@ -360,12 +416,11 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
             )
             betas.append(f_x)
     else:
-        data1 = jax.tree.map(lambda x: x[1:], data)
-        s_t = s[data1.t]
-        Ne_t = Ne[data1.t]
-        (_, ll, _), betas = lax.scan(_f, (beta0, ll0, data.t[0]), (data1, s_t, Ne_t))
+        s_t = s[data.t]
+        Ne_t = Ne[data.t]
+        (_, ll, _), betas = lax.scan(_f, (beta0, 0.0, data.t[0]), (data, s_t, Ne_t))
 
-    return (betas, beta0), ll
+    return betas, ll
 
 
 def loglik(s, Ne, data: Dataset, beta0: BetaMixture):
