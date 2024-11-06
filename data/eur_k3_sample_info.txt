@@ -1,4 +1,4 @@
-IID	Group	Sex	Date	Population	NumSNPs	k1	k2	k3	k4
+IID	Group	Sex	Date	Population	NumSNPs	k1	k2	k3
 I19493_in.preparation	BA-S	F	2750.0	Bulgaria_EIA	72615	0.023042	0.692354	0.284604
 I16326	BA-N	F	2625.0	Czech_IA_Hallstatt	487289	0.247210	0.315572	0.437218
 I14200	BA-N	M	4328.0	England_BellBeaker_highEEF	158917	0.217486	0.356541	0.425974
