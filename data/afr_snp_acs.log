@@ -1,0 +1,25 @@
+PLINK v2.00a3LM 64-bit Intel (28 Oct 2020)
+Options in effect:
+  --bfile data/selection_filtering/afr_all
+  --export A include-alt
+  --export-allele data/time_series_input/afr_snps.txt
+  --out data/time_series_input/afr_snp_acs
+  --snps rs6479327
+
+Hostname: math1
+Working directory: /project/mathilab/colbranl/eas_selection
+Start time: Mon Jan 13 12:11:57 2025
+
+Random number seed: 1736788317
+385251 MiB RAM detected; reserving 192625 MiB for main workspace.
+Using up to 48 threads (change this with --threads).
+420 samples (200 females, 220 males; 420 founders) loaded from
+data/selection_filtering/afr_all.fam.
+1233013 variants loaded from data/selection_filtering/afr_all.bim.
+1 binary phenotype loaded (0 cases, 420 controls).
+--snps: 1 variant remaining.
+1 variant remaining after main filters.
+--export-allele: 1 variant updated.
+--export A: data/time_series_input/afr_snp_acs.raw written.
+
+End time: Mon Jan 13 12:11:57 2025

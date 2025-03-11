@@ -4,22 +4,22 @@ Options in effect:
   --export A include-alt
   --export-allele data/time_series_input/sam_snps.txt
   --out data/time_series_input/sam_snp_acs
-  --snps rs5760093,rs2072786,rs6584603,rs7168739
+  --snps rs5760093,rs2072786,rs6584603,rs7168739,rs2386983,rs1790341,rs2973043,rs9273343,rs2317731,rs2735003,rs1051798
 
-Hostname: math2
+Hostname: math1
 Working directory: /project/mathilab/colbranl/eas_selection
-Start time: Thu Oct 31 11:19:00 2024
+Start time: Fri Jan 24 12:06:27 2025
 
-Random number seed: 1730387940
+Random number seed: 1737738387
 385251 MiB RAM detected; reserving 192625 MiB for main workspace.
 Using up to 48 threads (change this with --threads).
 406 samples (166 females, 190 males, 50 ambiguous; 406 founders) loaded from
 data/selection_filtering/sam_all.fam.
 1233013 variants loaded from data/selection_filtering/sam_all.bim.
 1 binary phenotype loaded (0 cases, 406 controls).
---snps: 4 variants remaining.
-4 variants remaining after main filters.
---export-allele: 4 variants updated.
+--snps: 11 variants remaining.
+11 variants remaining after main filters.
+--export-allele: 11 variants updated.
 --export A: data/time_series_input/sam_snp_acs.raw written.
 
-End time: Thu Oct 31 11:19:01 2024
+End time: Fri Jan 24 12:06:27 2025
