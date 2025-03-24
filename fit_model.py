@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
+import pickle
 import jax
 import argparse
 import re
@@ -10,7 +11,7 @@ from math import log, exp, sqrt
 from bmws import Observation, sim_and_fit, sim_wf
 from bmws.betamix import forward, BetaMixture
 from bmws.data import Dataset
-from bmws.estimate import empirical_bayes, estimate, jittable_estimate, _beta_pdf, sample_paths
+from bmws.estimate import empirical_bayes, estimate, jittable_estimate, sample_paths
 from bmws.sim import sim_admix
 import logging
 
@@ -245,13 +246,23 @@ def main(options):
 
     datasets, snps=read_data(options.pop)
     data=datasets[snps.index(options.snp)]
-    s,prior,Ne=run_analysis(data, alpha=alpha, beta=beta, em_iterations=options.em)
+    # import pickle
+    # kw = dict(data=data, alpha=alpha, beta=beta, em_iterations=options.em)
+    # pickle.dump(kw, file=open("kw.dat", "wb"))
+    # return
+    # s,prior,Ne=run_analysis(**kw)
     if options.resample=="parametric":
-        s_samples, paths=resample(s, data, Ne, prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
+        f = resample
     elif options.resample=="individual":
-        s_samples, paths=resample_individuals(s, data, Ne, prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
-    print(s)
-    plot_trajectories(options, s, s_samples, paths, data)
+        f = resample_individuals
+    # kw = dict(s=s, data=data, Ne=Ne, prior=prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
+    # pickle.dump(kw, file=open("kw.dat", "wb"))
+    kw = pickle.load(open("kw.dat", "rb"))
+    s = kw['s']
+    data = kw['data']
+    s_samples, paths = f(**kw)
+    pickle.dump((s_samples, paths), file=open(options.out, "wb"))
+    # plot_trajectories(options, s, s_samples, paths, data)
     return
 
 ################################################################

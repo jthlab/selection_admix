@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Union
 
+import equinox as eqx
 import jax
 import jaxopt
 import numpy as np
@@ -44,18 +45,20 @@ obj = jit(value_and_grad(_obj))
 
 
 @jnp.vectorize
-def _beta_pdf(x, a, b):
+def _beta_logpdf(x, a, b):
     x0 = jnp.isclose(x, 0.0)
     x1 = jnp.isclose(x, 1.0)
     z = ((a > 1) & x0) | ((b > 1) & x1)
     x_safe = jnp.where(z, 0.5, x)
-    r = jnp.exp(xlogy(a - 1, x_safe) + xlog1py(b - 1, -x_safe) - betaln(a, b))
-    return jnp.where(z, 0.0, r)
+    r = xlogy(a - 1, x_safe) + xlog1py(b - 1, -x_safe) - betaln(a, b)
+    return jnp.where(z, -jnp.inf, r)
 
 
 @partial(vmap, in_axes=(0, 0, None))
 def _interp(a, b, M) -> BetaMixture:
-    return BetaMixture.interpolate(lambda x: _beta_pdf(x, a, b), M, norm=True)
+    return BetaMixture.interpolate(
+        lambda x: _beta_logpdf(x, a, b), M, norm=True, log_f=True
+    )
 
 
 @dataclass
@@ -74,45 +77,44 @@ class _Optimizer:
             # jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        # opt = jaxopt.ProjectedGradient(
-        #     fun=_eb_loss,
-        #     projection=jaxopt.projection.projection_box,
-        #     tol=0.1,
-        #     implicit_diff=False,
-        #     # unroll=True,
-        #     # jit=False,
-        # )
-        # self._eb_opt = jit(opt.run)
-        opt = jaxopt.ScipyBoundedMinimize(
+        opt = jaxopt.ProjectedGradient(
             fun=_eb_loss,
+            projection=jaxopt.projection.projection_box,
+            tol=0.1,
+            implicit_diff=False,
+            # unroll=True,
+            # jit=False,
         )
-
-        #     projection=jaxopt.projection.projection_box,
-        #     tol=0.1,
-        #     implicit_diff=False,
-
-        self._eb_opt = opt.run
+        self._eb_opt = jit(opt.run)
+        # self._eb_opt = opt.run
 
         opt = jaxopt.ProjectedGradient(
             fun=_obj,
             projection=jaxopt.projection.projection_box,
             implicit_diff=False,
+            tol=0.1,
             # unroll=True,
             # jit=False,
-            tol=0.1,
         )
-        opt = jaxopt.ScipyBoundedMinimize(
-            fun=_obj,
-        )
-        # self._ll_opt = jit(opt.run)
-        self._ll_opt = opt.run
+        # opt = jaxopt.ScipyBoundedMinimize(
+        #     fun=_obj,
+        # )
+        self._ll_opt = jit(opt.run)
+        # self._ll_opt = opt.run
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
         ub = jnp.full_like(ab0, 100.0)
         bounds = (lb, ub)
         res = self._eb_opt(
-            ab0, bounds=bounds, s=s, Ne=Ne, data=data, alpha=alpha, beta=beta
+            # ab0, bounds=bounds, s=s, Ne=Ne, data=data, alpha=alpha, beta=beta
+            ab0,
+            hyperparams_proj=bounds,
+            s=s,
+            Ne=Ne,
+            data=data,
+            alpha=alpha,
+            beta=beta,
         )
         logger.debug("eb result: {}", res)
         ab = a_star, b_star = res.params
@@ -125,7 +127,8 @@ class _Optimizer:
         bounds = (jnp.full_like(s0, -0.2), jnp.full_like(s0, 0.2))
         res = self._ll_opt(
             s0,
-            bounds=bounds,
+            # bounds=bounds,
+            hyperparams_proj=bounds,
             alpha=alpha,
             beta=beta,
             Ne=Ne,
@@ -261,37 +264,48 @@ def _sample_path(
 ):
     def f(accum, seq):
         key, x_i1, Ne_i1, beta_i1 = accum
-        beta_i, Ne_i, s_i, i = seq
+        beta_i, Ne_i, s_i, i, t = seq
         # sampling
         k = x_i1 * Ne_i1
         N = Ne_i1
         # sample from pdf which is proportional to beta_i(x) * p(x_i1 | x_i = x)
-        # we have p(x_i1 | x_i = x) = binom(N_i1 * x_i1; N_i1; f(x)) \propto f(x)^k (1-f(x))^(Ni1-k)
-        # where f(x) is the selectino operator.
-        # if s=0 then f(x)=x so the target density is just proportional to a beta mixture
+        # - use metropolis hastings since I don't know how to sample from this distribution
+        # - we have p(x_i1 | x_i = x) = binom(N_i1 * x_i1; N_i1; f(x)) \propto f(x)^k (1-f(x))^(Ni1-k)
+        #   where f(x) is the selectino operator.
+        # - if s=0 then f(x)=x so the target density is just proportional to a beta mixture
+        # - so use this as the base measure
         f_x_star = beta_i.f_x._replace(a=beta_i.f_x.a + k, b=beta_i.f_x.b + Ne_i1 - k)
         beta_star = beta_i._replace(f_x=f_x_star)
 
+        # proposal distribution
+        log_q = partial(beta_star, log=True)
+
         def log_pi(x):
+            # target distribution
             y = (1 + s_i / 2) * x / (1 + s_i / 2 * x)
-            return beta_i(x, log=True) + xlogy(k, y) + xlog1py(Ne_i1 - k, -y)
+            return log_q(x) + jax.scipy.stats.binom.logpmf(k, N, y)
 
-        log_q = partial(beta_i, log=True)
+        def cond(tup):
+            x_t, key, a, i = tup
+            return (a < 100) & (i < 10_000)
 
-        def mh(_, tup):
-            x_t, key, a = tup
+        spikes = [k == 0, k == N]
+        sample_q = partial(beta_star.sample, spikes=spikes)
+
+        def mh(tup):
+            x_t, key, a, i = tup
             keys = jax.random.split(key, 3)
-            x_prime = beta_star.sample(keys[0])
+            x_prime = sample_q(keys[0])
             log_alpha = log_pi(x_prime) - log_pi(x_t) + log_q(x_t) - log_q(x_prime)
             # U < alpha => log(u) < log_alpha => exp(1) > -log(alpha)
             accept = jax.random.exponential(keys[1]) > -log_alpha
             x_t1 = jnp.where(accept, x_prime, x_t)
-            return (x_t1, keys[2], a + accept)
+            return (x_t1, keys[2], a + accept, i + 1)
 
         keys = jax.random.split(key, 3)
-        init = (beta_i.sample(keys[0]), keys[1], 0)
-        x, _, a = lax.fori_loop(0, 100, mh, init)
-        # jax.debug.print("x1:{} x:{} Ne_i:{} s_i:{} i:{} a:{}", x_i1, x, Ne_i, s_i, i, a)
+        init = (x_i1, keys[1], 0, 0)
+        x, _, a, _ = lax.while_loop(cond, mh, init)
+        # jax.debug.print("init:{} x1:{} x:{} Ne_i:{} s_i:{} t:{} a:{} i:{}", init[0], x_i1, x, Ne_i, s_i, t, a, i)
         return (keys[2], x, Ne_i, beta_i), x
 
     betas, _ = forward(s, Ne, data, prior)
@@ -305,11 +319,12 @@ def _sample_path(
         jax.tree.map(lambda a: a[sl], betas) for sl in (-1, slice(None, -1))
     ]
 
+    @jit
     def sample_beta(beta0, betas, Ne, s):
         keys = jax.random.split(key, 2)
         x0 = beta0.sample(keys[0])
         init = (keys[1], x0, Ne[t[-1]], beta0)
-        seq = (betas, Ne[t[:-1]], s[t[:-1]], jnp.arange(len(t) - 1))
+        seq = (betas, Ne[t[:-1]], s[t[:-1]], jnp.arange(len(t) - 1), t[:-1])
         _, samples = lax.scan(f, init, seq, reverse=True)
         return samples
 

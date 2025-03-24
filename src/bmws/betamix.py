@@ -2,6 +2,7 @@
 from functools import partial
 from typing import NamedTuple, Tuple, Union
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,21 +13,30 @@ from loguru import logger
 from bmws.data import Dataset
 
 
-def _clip_lp(log_p):
-    return jnp.where(
-        jnp.logaddexp(*log_p) >= 0.0,
-        # add a constant to log_p so that exp(logaddexp(*log_p)) ~= .999
-        log_p - jnp.logaddexp(*log_p) + jnp.log(0.999),
-        log_p,
+def log1mexp(x):
+    # log(1 - exp(x)), x < 0
+    # x = eqx.error_if(x, x >= 0, msg="x >= 0")
+    return jnp.where(x < -0.693, jnp.log1p(-jnp.exp(x)), jnp.log(-jnp.expm1(x)))
+
+
+def safe_lae(x, y):
+    x_safe = jnp.where(jnp.isneginf(x), 1.0, x)
+    y_safe = jnp.where(jnp.isneginf(y), 1.0, y)
+    return jnp.select(
+        [
+            jnp.isneginf(x) & jnp.isneginf(y),
+            jnp.isneginf(x) & ~jnp.isneginf(y),
+            ~jnp.isneginf(x) & jnp.isneginf(y),
+        ],
+        [-jnp.inf, y, x],
+        jnp.logaddexp(x_safe, y_safe),
     )
 
 
-@partial(vmap, in_axes=(0, 0))
-def _safe_lae(x, y):
-    both = jnp.isneginf(x) & jnp.isneginf(y)
-    x_safe = jnp.where(both, 1.0, x)
-    y_safe = jnp.where(both, 1.0, y)
-    return jnp.where(both, -jnp.inf, jnp.logaddexp(x_safe, y_safe))
+def safe_logsumexp(v):
+    all_neginf = jnp.isneginf(v).all()
+    v_safe = jnp.where(all_neginf, 0.0, v)
+    return jnp.where(all_neginf, -jnp.inf, logsumexp(v_safe))
 
 
 def _scan(f, init, xs, length=None):
@@ -50,7 +60,11 @@ def _logbinom(n: int, k: int) -> float:
     Returns:
         float: The natural logarithm of the binomial coefficient.
     """
-    return -jnp.log(n + 1) - betaln(k + 1, n - k + 1)
+    return jnp.where(
+        n > 0,
+        -jnp.log(n + 1) - betaln(k + 1, n - k + 1),
+        jnp.where(k == 0, 0.0, -jnp.inf),
+    )
 
 
 def _wf_trans(s, N, a, b):
@@ -91,8 +105,6 @@ def _wf_trans(s, N, a, b):
         )
     ) / (4.0 * (a + b) ** 2 * (1 + a + b) ** 2 * (2 + a + b) * (3 + a + b))
     var = Evar + varE
-    # EX = E(p')
-    # var = E(p'(1-p')/N) + var(p) + (s/2)^2 var(p(1-p)) + s * cov(p, p(1-p))
     u = EX * (1 - EX) / var - 1.0
     a1 = u * EX
     b1 = u * (1 - EX)
@@ -123,10 +135,12 @@ class BetaMixture(NamedTuple):
 
     @classmethod
     def uniform(cls, M) -> "BetaMixture":
-        return cls.interpolate(lambda x: 1.0, M, norm=True)
+        return cls.interpolate(lambda x: 0.0, M, norm=True, log_f=True)
 
     @classmethod
-    def interpolate(cls, f, M, interval=(0.0, 1.0), norm=False) -> "BetaMixture":
+    def interpolate(
+        cls, f, M, interval=(0.0, 1.0), norm=False, log_f=False
+    ) -> "BetaMixture":
         # bernstein polynomial basis:
         # sum_{i=0}^(M) f(i/M) binom(M,i) x^i (1-x)^(M-i)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) x^(i-1) (1-x)^(M-i+2-1)
@@ -144,10 +158,13 @@ class BetaMixture(NamedTuple):
         # assume f is zero outside of (u, v), so find the index i0 such that (u, v) \in [i0 / Q, (i0 + 1) / Q, ..., (i0 + M - 1) / Q]
         i0 = jnp.floor(u * Q).clip(2)
         i = i0 + jnp.arange(M)
-        c = vmap(f)((i - 1) / Q) / (1 + Q)
-        c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
-        c_safe = jnp.where(c0, 1.0, c)
-        log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
+        if log_f:
+            log_c = vmap(f)((i - 1) / Q) - jnp.log1p(Q)
+        else:
+            c = vmap(f)((i - 1) / Q) / (1 + Q)
+            c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
+            c_safe = jnp.where(c0, 1.0, c)
+            log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
         if norm:
             log_c -= logsumexp(log_c)
         return cls(a=i, b=Q - i + 2, log_c=log_c)
@@ -199,20 +216,45 @@ class SpikedBeta(NamedTuple):
     log_p: jnp.ndarray  # spikes at 0 and 1
     f_x: BetaMixture  # abs. continuous component
 
-    def sample(self, key: jax.random.PRNGKey):
+    @classmethod
+    def safe_init(cls, log_p, f_x):
+        "ensure that the spikes sum up to strictly less than 1 and the mixture sums to one"
+        log_p = jnp.clip(log_p, -jnp.inf, -1e-8)
+        # if logaddexp(log_p) >= 0 then we want to multiply p by .99999 / p.sum().
+        # equivalently, we want to add log(.99999 / p.sum()) = log(1-1e-8) - log_ps
+        log_ps = safe_lae(log_p[0], log_p[1])
+        safe_log_p = jnp.where(jnp.isneginf(log_ps), 1.0, log_p)
+        safe_log_ps = jnp.where(jnp.isneginf(log_ps), 1.0, log_ps)
+        log_p = jnp.where(
+            log_ps >= 0,
+            safe_log_p + jnp.log1p(-1e-8) - safe_log_ps,
+            log_p,
+        )
+        # adjust the continuous weights to be 1 - lae(log_p)
+        log_ps = safe_lae(log_p[0], log_p[1])
+        # log_ps = eqx.error_if(log_ps, log_ps >= jnp.log1p(-1e-8), msg="log_ps >= 0")
+        # logsumexp(f_x.log_c) = log1p(-exp(log_ps))
+        log_c = f_x.log_c - logsumexp(f_x.log_c) + log1mexp(log_ps)
+        return cls(log_p, f_x._replace(log_c=log_c))
+
+    def sample(self, key: jax.random.PRNGKey, spikes: bool = None):
+        if spikes is None:
+            spikes = [True, True]
         keys = jax.random.split(key, 3)
         i = jax.random.categorical(keys[0], self.f_x.log_c)
         f = jax.random.beta(keys[1], self.f_x.a[i], self.f_x.b[i])
         a = jnp.array([0.0, 1.0, f])
-        p = jnp.exp(self.log_p)
-        p = jnp.append(p, 1 - p.sum())
+        p_spike = jnp.exp(self.log_p)
+        p_spike *= jnp.array(spikes)
+        p = jnp.append(p_spike, 1 - p_spike.sum())
+        p /= p.sum()
         return jax.random.choice(keys[2], a, p=p)
 
     def __call__(self, x, log: bool = False):
         ret = jnp.select(
             [jnp.isclose(x, 0.0), jnp.isclose(x, 1.0)],
             [self.log_p[0], self.log_p[1]],
-            self.log_r + self.f_x(x, log),
+            self.log_r + self.f_x(x, log=True),
         )
         if not log:
             ret = jnp.exp(ret)
@@ -230,22 +272,13 @@ class SpikedBeta(NamedTuple):
     #     return self.EX2() - self.mean()**2
 
     @property
-    def p(self):
-        return jnp.exp(self.log_p)
+    def log_r(self):
+        lp = safe_lae(self.log_p[0], self.log_p[1]).clip(-jnp.inf, -1e-8)
+        return log1mexp(lp)
 
     @property
     def r(self):
-        # the probability of the absolutely continuous component
-        # log(1 - exp(log_p).sum()) = log(1 - sum(exp(log_p)))
-        # = logsumexp(0, log_p) = log1p(-exp(log_p).sum())
-        assert self.log_p.shape == (2,)
-        r = -jnp.expm1(jnp.logaddexp(self.log_p[0], self.log_p[1]))
-        r = r.clip(1e-8, 1.0 - 1e-8)
-        return r
-
-    @property
-    def log_r(self):
-        return jnp.log(self.r)
+        return jnp.exp(self.log_r)
 
     @property
     def M(self):
@@ -260,6 +293,7 @@ class SpikedBeta(NamedTuple):
         plt.bar(1.0, self.p1, 0.05, alpha=0.2, color="tab:red")
 
 
+@jit
 def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
     """Given a prior distribution on population allele frequency, compute posterior after
     one round of WF mating."""
@@ -275,9 +309,16 @@ def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
         log_p_c = log_r + logsumexp(
             log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
         )  # [2] probability of loss or fixation in continuous component
-        log_p1 = _clip_lp(jnp.logaddexp(log_p, log_p_c))
+        log_p1 = safe_lae(log_p, log_p_c)
         a1, b1 = _wf_trans(si, Nei, a, b)
-        return SpikedBeta(log_p1, BetaMixture(a1, b1, log_c))
+        EX0 = jnp.isclose(b1, -1.0)
+        EX1 = jnp.isclose(a1, -1.0)
+        log_p2_0 = safe_lae(log_p1[0], safe_logsumexp(jnp.where(EX0, log_c, -jnp.inf)))
+        log_p2_1 = safe_lae(log_p1[1], safe_logsumexp(jnp.where(EX1, log_c, -jnp.inf)))
+        log_p2 = jnp.array([log_p2_0, log_p2_1])
+        log_c = jnp.where(EX0 | EX1, -jnp.inf, log_c)
+        # jax.debug.print("si:{} wfa:{} wfb:{} wfa1:{} wfb1:{}", si, a, b, a1, b1, ordered=True)
+        return SpikedBeta.safe_init(log_p2, BetaMixture(a1, b1, log_c))
 
     assert f.log_p.ndim == 2
     assert f.log_p.shape[1] == 2
@@ -292,12 +333,16 @@ def _binom_sampling(n, d, f: SpikedBeta):
     a1 = a + d
     b1 = b + n - d
     # probability of the data given the absolutely continuous component
-    log_p_data_comp_cont = log_c + betaln(a1, b1) - betaln(a, b) + _logbinom(n, d)
-    log_p_data_cont = logsumexp(log_p_data_comp_cont)
+    log_p_data_comp_cont = jnp.where(
+        jnp.isneginf(log_c),
+        -jnp.inf,
+        log_c + betaln(a1, b1) - betaln(a, b) + _logbinom(n, d),
+    )
+    log_p_data_cont = safe_logsumexp(log_p_data_comp_cont)
     # probability of the data given the spike components
-    log_p_data_spike = jnp.where((n > 0) & (d == jnp.array([0, n])), 0.0, -100)
+    log_p_data_spike = jnp.where((n > 0) & (d == jnp.array([0, n])), 0.0, -jnp.inf)
     # overall probability of the data
-    ll = jnp.logaddexp(log_r + log_p_data_cont, logsumexp(log_p + log_p_data_spike))
+    ll = safe_lae(log_r + log_p_data_cont, safe_logsumexp(log_p + log_p_data_spike))
     # probability of spikes given data: p(spike | data) =
     # p(data | spike) p(spike) / p(data)
     log_p1 = log_p_data_spike + log_p - ll
@@ -305,11 +350,12 @@ def _binom_sampling(n, d, f: SpikedBeta):
     # p(comp | data, cont) = p(data | comp, cont) * p(comp | cont) / p(data | cont)
     log_c1 = log_p_data_comp_cont - log_p_data_cont
     # posterior after binomial sampling --
-    # clip to avoid numerical issues -- if p0/p1 ~= 1 then the model becomes degenerate
-    beta = SpikedBeta(log_p1, BetaMixture(a1, b1, log_c1))
+    log_c1 = eqx.error_if(log_c1, jnp.isnan(log_c1).any(), msg="nan in log_c1")
+    beta = SpikedBeta.safe_init(log_p1, BetaMixture(a1, b1, log_c1))
     return beta, ll
 
 
+@jit
 def _binom_sampling_admix(fs: SpikedBeta, datum: Dataset) -> Tuple[SpikedBeta, float]:
     """Compute filtering distributions after observing alleles.
 
@@ -332,14 +378,13 @@ def _binom_sampling_admix(fs: SpikedBeta, datum: Dataset) -> Tuple[SpikedBeta, f
         log_c1 = jnp.concatenate(
             [lt[0] + beta0.f_x.log_c, lt[1] + beta1.f_x.log_c]
         )  # [2 * M]
-        # since n=1, d is either 0 or 1:
+        # since n=1, d is either 0 or 1
         # if d = 0 then a1 = [a, a] and b1 = [b, b+1] with
         # log_c1 = [log_c0, log_c1] + log_p_mix
         a1 = jnp.concatenate([beta0.f_x.a, beta1.f_x.a])
         b1 = jnp.concatenate([beta0.f_x.b, beta1.f_x.b])
         # approximate the mixture on 2*M components
         bm0 = BetaMixture(a1, b1, log_c1)
-        # jax.debug.print("mean(bm0):{} sd(bm0):{}", bm0.mean, jnp.sqrt(bm0.var))
         if True:
             bm = bm0.top_k(M)
         else:
@@ -350,15 +395,51 @@ def _binom_sampling_admix(fs: SpikedBeta, datum: Dataset) -> Tuple[SpikedBeta, f
             v = jnp.minimum(1.0, mean + 3 * sd)
             bm = BetaMixture.interpolate(bm0, M, norm=True, interval=(u, v))
         # now update the spike probabilities
-        log_p1 = _clip_lp(jnp.logaddexp(lt[0] + beta0.log_p, lt[1] + beta1.log_p))
-        return SpikedBeta(log_p1, bm)
+        log_p1 = safe_lae(lt[0] + beta0.log_p, lt[1] + beta1.log_p)
+        ret = SpikedBeta.safe_init(log_p1, bm)
+        return ret
 
-    fs2 = vmap(_combine, (0, 0, 0))(datum.theta, fs0, fs1)
+    fs2 = vmap(_combine)(datum.theta, fs0, fs1)
+    # jax.debug.print("fs0:{} fs1:{} fs2:{}", fs0, fs1, fs2, ordered=True)
     return fs2, ll
 
 
 def _tree_where(cond, a, b):
     return jax.tree.map(partial(jnp.where, cond), a, b)
+
+
+def check_spikes(beta: SpikedBeta):
+    return safe_lae(beta.log_p[0], beta.log_p[1]) >= 0
+
+
+def _fix_spikes(beta: SpikedBeta):
+    # ensure that the larger of the two spikes is strictly less that 1 - the smaller of the two
+    m = jnp.minimum(log1mexp(beta.log_p.min()), -1e-8)
+    log_p = jnp.clip(beta.log_p, -jnp.inf, m)
+    return beta._replace(log_p=log_p)
+
+
+def _forward_helper(accum, tup):
+    beta0, ll0, last_t = accum
+    datum, s_t, Ne_t, i = tup
+    # jax.debug.print("beta0:{} datum:{}", beta0, datum, ordered=True)
+    # jax.debug.print('log_p:{} b.mean:{} datum:{}', beta0.log_p, vmap(lambda p: p.f_x.mean)(beta0), datum, ordered=True)
+    assert beta0.log_p.ndim == 2
+    assert beta0.log_p.shape[1] == 2
+    beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne_t), beta0)
+    # jax.debug.print("beta1:{}", beta1, ordered=True)
+    # beta1 = eqx.error_if(beta1, cs.any(), msg="spikes >= 1")
+    # now process the observation
+    n, d = datum.obs
+    beta2, ll1 = _tree_where(n > 0, _binom_sampling_admix(beta1, datum), (beta1, 0.0))
+    ll = ll0 + ll1
+    # jax.debug.print("beta2:{}", beta2, ordered=True)
+    accum = (beta2, ll, datum.t)
+    nan = jax.tree.reduce(
+        lambda x, y: x | y, jax.tree_map(lambda a: jnp.isnan(a).any(), accum)
+    )
+    accum = eqx.error_if(accum, nan, msg="nan in accum")
+    return accum, beta2
 
 
 # @partial(jit, static_argnums=3)
@@ -379,46 +460,30 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
     T, K = Ne.shape
     assert s.shape == Ne.shape == (T, K)
 
-    # @jax.remat
-    def _f(accum, tup):
-        beta0, ll0, last_t = accum
-        datum, s_t, Ne_t = tup
-        assert beta0.log_p.ndim == 2
-        assert beta0.log_p.shape[1] == 2
-        # assert beta1.log_p.ndim == 2
-        # assert beta1.log_p.shape[1] == 2
-        # beta2 = lax.cond(
-        #     datum.t != last_t, lambda b: _transition(b, s_t, Ne_t), lambda b: b, beta0
-        # )
-        beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne_t), beta0)
-        # now process the observation
-        n, d = datum.obs
-        beta2, ll1 = _tree_where(
-            n > 0, _binom_sampling_admix(beta1, datum), (beta1, 0.0)
-        )
-        ll = ll0 + ll1
-        return (beta2, ll, datum.t), beta2
-
-    ninf = jnp.full([data.K, 2], -100.0)
+    ninf = jnp.full([data.K, 2], -jnp.inf)
     beta0 = SpikedBeta(ninf, beta)
+    s_t = s[data.t]
+    Ne_t = Ne[data.t]
 
     if False:
         logger.warning("Compiling unrolled forward loop!")
         # compile-free loop for debugging
         betas = []
         f_x = beta0
-        ll = ll0
+        ll = 0.0
         t = data.t[0]
         for i in range(1, len(data.t)):
-            (f_x, ll, t), _ = _f(
+            (f_x, ll, t), _ = _forward_helper(
                 (f_x, ll, t),
-                jax.tree.map(lambda x: x[i], data),
+                jax.tree.map(lambda x: x[i], (data, s_t, Ne_t)),
             )
             betas.append(f_x)
     else:
-        s_t = s[data.t]
-        Ne_t = Ne[data.t]
-        (_, ll, _), betas = lax.scan(_f, (beta0, 0.0, data.t[0]), (data, s_t, Ne_t))
+        (_, ll, _), betas = lax.scan(
+            _forward_helper,
+            (beta0, 0.0, data.t[0]),
+            (data, s_t, Ne_t, jnp.arange(len(Ne_t))),
+        )
 
     return betas, ll
 
