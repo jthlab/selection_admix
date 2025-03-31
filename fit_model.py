@@ -3,10 +3,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
-import pickle
 import jax
 import argparse
 import re
+import os
 from math import log, exp, sqrt
 from bmws import Observation, sim_and_fit, sim_wf
 from bmws.betamix import forward, BetaMixture
@@ -14,6 +14,8 @@ from bmws.data import Dataset
 from bmws.estimate import empirical_bayes, estimate, jittable_estimate, sample_paths
 from bmws.sim import sim_admix
 import logging
+
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.3'
 
 rng = np.random.default_rng()
 
@@ -66,7 +68,7 @@ def read_data(pop):
 ################################################################
 #Run analysis 
 def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, s=None):
-    M=100
+    M = 100
     Ne=np.full([data.T, data.K], 1e4)
     Ne_fit=Ne
     if s is None:
@@ -88,7 +90,7 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, s=None):
 #Resampling by parametric bootstrapping
 
 def resample(s, data, Ne, prior, N=10, em_iterations=10, alpha=1e4, beta=1):
-    paths=sample_paths(s, Ne, data, prior, N)
+    paths=sample_paths(s, Ne, data, prior, 100)
     #Now resample observations
     dataset_samples=[]
     s_samples=[]
@@ -101,8 +103,11 @@ def resample(s, data, Ne, prior, N=10, em_iterations=10, alpha=1e4, beta=1):
         records = []
         Tmax=int(max(t))
         for k in range(obs.shape[0]):
+            n = int(obs[k][0])
             rec = {'t': int(t[k])}
-            rec['obs'] = (int(obs[k][0]),rng.binomial(int(obs[k][0]), float(np.sum(paths[i,:,Tmax-int(t[k])]*data.theta[k]))))
+            # rec['obs'] = (n ,rng.binomial(n , float(np.sum(paths[i,:,Tmax-int(t[k])]*data.theta[k]))))
+            p = rng.choice(paths[i, :, Tmax-int(t[k])], p=data.theta[k])
+            rec['obs'] = (n , rng.binomial(n, p))
             rec['theta'] = data.theta[k]
             records.append(rec)
         
