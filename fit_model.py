@@ -251,23 +251,17 @@ def main(options):
 
     datasets, snps=read_data(options.pop)
     data=datasets[snps.index(options.snp)]
-    # import pickle
-    # kw = dict(data=data, alpha=alpha, beta=beta, em_iterations=options.em)
-    # pickle.dump(kw, file=open("kw.dat", "wb"))
-    # return
-    # s,prior,Ne=run_analysis(**kw)
+    kw = dict(data=data, alpha=alpha, beta=beta, em_iterations=options.em)
+    s,prior,Ne=run_analysis(**kw)
     if options.resample=="parametric":
         f = resample
     elif options.resample=="individual":
         f = resample_individuals
-    # kw = dict(s=s, data=data, Ne=Ne, prior=prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
-    # pickle.dump(kw, file=open("kw.dat", "wb"))
-    kw = pickle.load(open("kw.dat", "rb"))
+    kw = dict(s=s, data=data, Ne=Ne, prior=prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
     s = kw['s']
     data = kw['data']
     s_samples, paths = f(**kw)
-    pickle.dump((s_samples, paths), file=open(options.out, "wb"))
-    # plot_trajectories(options, s, s_samples, paths, data)
+    plot_trajectories(options, s, s_samples, paths, data)
     return
 
 ################################################################
