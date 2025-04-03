@@ -6,7 +6,6 @@ import pandas as pd
 import jax
 import argparse
 import re
-import os
 from math import log, exp, sqrt
 from bmws import Observation, sim_and_fit, sim_wf
 from bmws.betamix import forward, BetaMixture
@@ -14,8 +13,6 @@ from bmws.data import Dataset
 from bmws.estimate import empirical_bayes, estimate, jittable_estimate, sample_paths
 from bmws.sim import sim_admix
 import logging
-
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.3'
 
 rng = np.random.default_rng()
 
@@ -105,9 +102,8 @@ def resample(s, data, Ne, prior, N=10, em_iterations=10, alpha=1e4, beta=1):
         for k in range(obs.shape[0]):
             n = int(obs[k][0])
             rec = {'t': int(t[k])}
-            # rec['obs'] = (n ,rng.binomial(n , float(np.sum(paths[i,:,Tmax-int(t[k])]*data.theta[k]))))
-            p = rng.choice(paths[i, :, Tmax-int(t[k])], p=data.theta[k])
-            rec['obs'] = (n , rng.binomial(n, p))
+            p = rng.choice(paths[i,:,Tmax-int(t[k])], p=data.theta[k])
+            rec['obs'] = (n, rng.binomial(n, p))
             rec['theta'] = data.theta[k]
             records.append(rec)
         
@@ -251,16 +247,12 @@ def main(options):
 
     datasets, snps=read_data(options.pop)
     data=datasets[snps.index(options.snp)]
-    kw = dict(data=data, alpha=alpha, beta=beta, em_iterations=options.em)
-    s,prior,Ne=run_analysis(**kw)
+    s,prior,Ne=run_analysis(data, alpha=alpha, beta=beta, em_iterations=options.em)
     if options.resample=="parametric":
-        f = resample
+        s_samples, paths=resample(s, data, Ne, prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
     elif options.resample=="individual":
-        f = resample_individuals
-    kw = dict(s=s, data=data, Ne=Ne, prior=prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
-    s = kw['s']
-    data = kw['data']
-    s_samples, paths = f(**kw)
+        s_samples, paths=resample_individuals(s, data, Ne, prior, N=options.N, em_iterations=options.fm, alpha=alpha, beta=beta)
+    print(s)
     plot_trajectories(options, s, s_samples, paths, data)
     return
 

@@ -248,14 +248,16 @@ def sample_paths(
           Therefore, there they have one less entry than the number of observations.
     """
     keys = jax.random.split(jax.random.PRNGKey(seed), k)
+    betas, _ = forward(s, Ne, data, prior)
 
     def f(key):
-        return _sample_path(s, Ne, data, prior, key)
+        return _sample_path(betas, s, Ne, data, prior, key)
 
     return jax.vmap(f)(keys)
 
 
 def _sample_path(
+    betas,
     s: np.ndarray,
     Ne: np.ndarray,
     data: Dataset,
@@ -308,7 +310,6 @@ def _sample_path(
         # jax.debug.print("init:{} x1:{} x:{} Ne_i:{} s_i:{} t:{} a:{} i:{}", init[0], x_i1, x, Ne_i, s_i, t, a, i)
         return (keys[2], x, Ne_i, beta_i), x
 
-    betas, _ = forward(s, Ne, data, prior)
     mask = jnp.append(data.t[1:] != data.t[:-1], True)
     t = data.t[mask]
     betas = jax.tree.map(lambda a: a[mask], betas)

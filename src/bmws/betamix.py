@@ -144,9 +144,7 @@ class BetaMixture(NamedTuple):
         return cls.interpolate(lambda x: 0.0, M, norm=True, log_f=True)
 
     @classmethod
-    def interpolate(
-        cls, f, M, interval=(0.0, 1.0), norm=False, log_f=False
-    ) -> "BetaMixture":
+    def interpolate(cls, f, M, norm=False, log_f=False) -> "BetaMixture":
         # bernstein polynomial basis:
         # sum_{i=0}^(M) f(i/M) binom(M,i) x^i (1-x)^(M-i)
         #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) x^(i-1) (1-x)^(M-i+2-1)
@@ -154,26 +152,18 @@ class BetaMixture(NamedTuple):
         #   = sum_{i=1}^(M+1) f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
         #   we assume that f(0) = f(1) = 0 hence
         #   = sum_{i=2}^M f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
-        # slice up interval into M chunks
-        u, v = interval
-        # slice up the interval into M slices
-        delta = (v - u) / M
-        Q = jnp.ceil(1 / delta)
-        # M + 2 because we assume that f(0)=f(1)=0, so those first and last slices don't count
-        Q = jnp.maximum(Q, M + 2)
-        # assume f is zero outside of (u, v), so find the index i0 such that (u, v) \in [i0 / Q, (i0 + 1) / Q, ..., (i0 + M - 1) / Q]
-        i0 = jnp.floor(u * Q).clip(2)
-        i = i0 + jnp.arange(M)
+        N = M + 1
+        i = jnp.arange(2, N + 1, dtype=float)  # N - 1 => M + 1
         if log_f:
-            log_c = vmap(f)((i - 1) / Q) - jnp.log1p(Q)
+            log_c = vmap(f)((i - 1) / N) - jnp.log1p(N)
         else:
-            c = vmap(f)((i - 1) / Q) / (1 + Q)
+            c = vmap(f)((i - 1) / N) / (1 + N)
             c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
             c_safe = jnp.where(c0, 1.0, c)
             log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
         if norm:
             log_c -= logsumexp(log_c)
-        return cls(a=i, b=Q - i + 2, log_c=log_c)
+        return cls(a=i, b=N - i + 2, log_c=log_c)
 
     @property
     def M(self):
