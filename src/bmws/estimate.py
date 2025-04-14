@@ -77,30 +77,11 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.ProjectedGradient(
-            fun=_eb_loss,
-            projection=jaxopt.projection.projection_box,
-            tol=0.1,
-            implicit_diff=False,
-            # unroll=True,
-            # jit=False,
-        )
+        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
         self._eb_opt = jit(opt.run)
-        # self._eb_opt = opt.run
 
-        opt = jaxopt.ProjectedGradient(
-            fun=_obj,
-            projection=jaxopt.projection.projection_box,
-            implicit_diff=False,
-            tol=0.1,
-            # unroll=True,
-            # jit=False,
-        )
-        # opt = jaxopt.ScipyBoundedMinimize(
-        #     fun=_obj,
-        # )
+        opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
         self._ll_opt = jit(opt.run)
-        # self._ll_opt = opt.run
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
@@ -109,7 +90,7 @@ class _Optimizer:
         res = self._eb_opt(
             # ab0, bounds=bounds, s=s, Ne=Ne, data=data, alpha=alpha, beta=beta
             ab0,
-            hyperparams_proj=bounds,
+            bounds=bounds,
             s=s,
             Ne=Ne,
             data=data,
@@ -127,8 +108,7 @@ class _Optimizer:
         bounds = (jnp.full_like(s0, -0.2), jnp.full_like(s0, 0.2))
         res = self._ll_opt(
             s0,
-            # bounds=bounds,
-            hyperparams_proj=bounds,
+            bounds=bounds,
             alpha=alpha,
             beta=beta,
             Ne=Ne,

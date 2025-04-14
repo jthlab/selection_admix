@@ -1,0 +1,217 @@
+import pickle
+import numpy as np
+import bmws.data
+import pandas as pd
+from bmws.estimate import estimate, empirical_bayes, sample_paths
+
+
+def read_data(pop):
+    pop = pop.lower()
+    admixture_proportions = pd.read_csv("data/" + pop + "_sample_info.txt", sep="\t")
+    admixture_proportions["generation"] = [
+        int(x) for x in round(admixture_proportions["Date"] / 30)
+    ]
+    admixture_proportions = admixture_proportions[
+        (admixture_proportions["Date"] <= 10000)
+    ]
+
+    # merge allele counts
+    counts = pd.read_csv("data/" + pop + "_snp_acs.raw", sep="\t")
+    snps = list(counts.columns)[6:]
+    data = pd.merge(admixture_proportions, counts, on="IID")
+
+    # Parameters for data matrices
+    T = max(data["generation"]) + 1
+    N = max(data["generation"].value_counts().values)
+    K = admixture_proportions.shape[1] - 7
+    datasets = []
+    for snp in snps:
+        records = []
+        for gen, count in data["generation"].value_counts().items():
+            this_data = data[data["generation"] == gen]
+            M = this_data.shape[0]
+            for i in range(M):
+                if not this_data[snp].isna().iloc[i]:
+                    rec = {"t": gen}
+                    rec["obs"] = (1, int(this_data[snp].values[i] / 2))
+                    rec["theta"] = [
+                        this_data["k" + str(k + 1)].iloc[i] for k in range(K - 1)
+                    ]
+                    rec["theta"].append(1 - sum(rec["theta"]))
+                    records.append(rec)
+
+        datasets.append(bmws.data.Dataset.from_records(records))
+
+    return datasets, snps
+
+
+def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
+    M = 100
+    Ne = np.full([data.T, data.K], 1e4)
+    Ne_fit = Ne
+    s = np.zeros([data.T, data.K])
+    ab = np.ones([2, data.K]) + 1e-4
+    estimate_kwargs = {"alpha": alpha, "beta": beta, "gamma": gamma}
+
+    print("Analysis")
+    print("alpha=" + str(alpha) + "; beta=" + str(beta))
+    for i in range(em_iterations):
+        print("Iteration " + str(i))
+        print("estimate_kwargs " + str(estimate_kwargs))
+        ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
+        s = estimate(data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
+    return s, prior, Ne
+
+
+def resample_individuals(paths, s, data, Ne, prior, rng, em_iterations, alpha, beta):
+    # Now resample observations
+    t = data.t
+    theta = data.theta
+    obs = data.obs
+    records = []
+    Tmax = int(max(t))
+    present_obs = (data.t == 0).nonzero()[0]
+    nonzero_anc_obs = np.logical_and(data.obs[:, 0] > 0, data.t != 0).nonzero()[0]
+    for k in range(len(present_obs)):  # keep present-day individuals.
+        pik = present_obs[k]
+        rec = {"t": data.t[pik]}
+        rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+        rec["theta"] = data.theta[pik]
+        records.append(rec)
+    pik = 0  # include earlist timepoint to maintain size
+    rec = {"t": data.t[pik]}
+    rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+    rec["theta"] = data.theta[pik]
+    records.append(rec)
+    for k in range(len(nonzero_anc_obs)):  # resample ancient individuals
+        pik = rng.choice(nonzero_anc_obs)
+        rec = {"t": data.t[pik]}
+        rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+        rec["theta"] = data.theta[pik]
+        records.append(rec)
+    dataset_samples = bmws.data.Dataset.from_records(records)
+    # run inference
+    s_s, prior_s, Ne_s = run_analysis(
+        dataset_samples, alpha=alpha, beta=beta, em_iterations=em_iterations
+    )
+    return s_s
+
+
+def dump_file(obj, fn):
+    with open(fn, "wb") as f:
+        pickle.dump(obj, file=f)
+
+
+def load_file(fn):
+    with open(fn, "rb") as f:
+        return pickle.load(f)
+
+
+wildcard_constraints:
+    population=r"\w+",
+    seed=r"\d+",
+    snp=r"\w+",
+
+
+def input_for_all(wc):
+    lst = []
+    for pop in ["EAS", "EUR", "SAM", "SAS", "AFR"]:
+        counts = pd.read_csv("data/" + pop.lower() + "_snp_acs.raw", sep="\t")
+        snps = list(counts.columns)[6:]
+        lst.extend([(pop, s) for s in snps])
+
+    return [
+        f"results/{pop}/{snp}/a4.5/b1/em10/resample_{i}.pkl"
+        for pop, snp in lst
+        for i in range(10)
+    ]
+
+
+rule all:
+    input:
+        input_for_all,
+
+
+rule read_data_test:
+    output:
+        "results/test_test/data.pkl",
+    run:
+        ds = bmws.data.Dataset.from_records(
+            [
+                dict(t=20, theta=np.array([0.1, 0.3, 0.6]), obs=(1, 1)),
+                dict(t=18, theta=np.array([1.0, 0.0, 0.0]), obs=(1, 0)),
+                dict(t=10, theta=np.array([0.1, 0.4, 0.5]), obs=(2, 1)),
+                dict(t=10, theta=np.array([0.1, 0.0, 0.9]), obs=(5, 2)),
+                dict(t=10, theta=np.array([0.5, 0.0, 0.5]), obs=(1, 1)),
+                dict(t=2, theta=np.array([0.2, 0.5, 0.3]), obs=(1, 1)),
+                dict(t=2, theta=np.array([0.5, 0.2, 0.3]), obs=(1, 0)),
+                dict(t=1, theta=np.array([0.5, 0.2, 0.3]), obs=(1, 1)),
+                dict(t=0, theta=np.array([0.0, 1.0, 0.0]), obs=(3, 2)),
+                dict(t=0, theta=np.array([0.2, 0.2, 0.6]), obs=(4, 1)),
+            ]
+        )
+        dump_file(ds, output[0])
+
+
+rule read_data:
+    output:
+        "results/{population}/data.pkl",
+    run:
+        res = read_data(wildcards.population)
+        dump_file(res, output[0])
+
+
+rule analyze:
+    input:
+        "results/{population}/data.pkl",
+    output:
+        "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/analyze.pkl",
+    resources:
+        gpus=1,
+    run:
+        datasets, snps = load_file(input[0])
+        wc = wildcards
+        data = datasets[snps.index(wc.snp)]
+        alpha = 10 ** float(wc.log_alpha)
+        beta = 10 ** float(wc.log_beta)
+        em_iterations = int(wc.em_iterations)
+        gamma = 0.0
+        res = run_analysis(data, alpha, beta, gamma, em_iterations)
+        dump_file((res, (alpha, beta, gamma, em_iterations)), output[0])
+
+
+rule sample_paths:
+    input:
+        "results/{population}/data.pkl",
+        "results/{population}/{snp}/{stuff}/analyze.pkl",
+    output:
+        "results/{population}/{snp}/{stuff}/paths.pkl",
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        datasets, snps = load_file(input[0])
+        data = datasets[snps.index(wildcards.snp)]
+        (s, prior, Ne), _ = load_file(input[1])
+        res = sample_paths(s, Ne, data, prior, 100)
+        dump_file(res, output[0])
+
+
+rule resample:
+    input:
+        "results/{population}/data.pkl",
+        "results/{population}/{snp}/{stuff}/analyze.pkl",
+        "results/{population}/{snp}/{stuff}/paths.pkl",
+    output:
+        "results/{population}/{snp}/{stuff}/resample_{seed}.pkl",
+    resources:
+        gpus=1,
+    run:
+        datasets, snps = load_file(input[0])
+        data = datasets[snps.index(wildcards.snp)]
+        (s, prior, Ne), (alpha, beta, gamma, em_iterations) = load_file(input[1])
+        paths = load_file(input[2])
+        seed = int(wildcards.seed)
+        rng = np.random.default_rng(seed)
+        res = resample_individuals(
+            paths, s, data, Ne, prior, rng, em_iterations, alpha, beta
+        )
+        dump_file(res, output[0])
