@@ -37,7 +37,7 @@ def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
     pairwise_diff = 0.5 * jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
     ret = -ll + alpha * temporal_diff + beta * pairwise_diff
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
-    # jax.debug.print('ll:{} td:{} pd:{}', ll, temporal_diff, pairwise_diff)
+    jax.debug.print("ll:{} td:{} pd:{}", ll, temporal_diff, pairwise_diff)
     return ret
 
 
@@ -74,7 +74,7 @@ class _Optimizer:
             prior = _interp(a, b, self.M)
             # prior = jax.vmap(lambda _: prior)(jnp.arange(data.K))
             ret = _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
-            # jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
+            jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
         opt = jaxopt.ProjectedGradient(

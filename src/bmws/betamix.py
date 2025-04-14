@@ -267,6 +267,11 @@ class SpikedBeta(NamedTuple):
     #     return self.EX2() - self.mean()**2
 
     @property
+    def mean(self):
+        p = jnp.exp(self.log_p)
+        return p @ jnp.array([0.0, 1.0]) + (1 - p.sum(-1)) * self.f_x.mean
+
+    @property
     def log_r(self):
         lp = safe_lae(self.log_p[..., 0], self.log_p[..., 1]).clip(-jnp.inf, -1e-8)
         return log1mexp(lp)
@@ -370,12 +375,6 @@ def _binom_sampling_admix(
     lam = jnp.exp(log_lam)
     # log_lam = eqx.debug.backward_nan(log_lam, "ll")
     fs2, _ = vmap(_binom_sampling)(n * lam, d * lam, fs)
-
-    def g(f0, f2, log_lam):
-        lp = vmap(safe_lae)(log1mexp(log_lam) + f0.log_p, log_lam + f2.log_p)
-        return f2._replace(log_p=lp)
-
-    fs2 = vmap(g)(fs0, fs2, log_lam)
     return fs2, ll
 
 
