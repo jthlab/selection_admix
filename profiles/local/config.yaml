@@ -1,0 +1,11 @@
+resources:
+  - gpus=1
+  - downsample=4  # limit concurrent downsample jobs, they take up a ton of memory.
+cores: "all"
+config:
+  - unified_path="/scratch/unified"
+  - basedir="/home/terhorst/Dropbox (University of Michigan)/Research/eastbay/paper_repo"
+  - workdir="/scratch/eastbay_paper/simulation_results_full"
+  - bcftools_path="/usr/bin/bcftools"
+  - scrm_path="/usr/bin/scrm"
+  - psmc_path="/usr/bin/psmc"
