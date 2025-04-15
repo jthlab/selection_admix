@@ -11,3 +11,5 @@ jobs: 400
 keep-going: True
 rerun-incomplete: True
 printshellcmds: True
+config:
+  - figure_path="/nfs/turbo/lsa-jonth/jonth/bmws_admix/figures"

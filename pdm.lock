@@ -2091,16 +2091,16 @@ files = [
 
 [[package]]
 name = "prompt-toolkit"
-version = "3.0.50"
-requires_python = ">=3.8.0"
+version = "3.0.51"
+requires_python = ">=3.8"
 summary = "Library for building powerful interactive command lines in Python"
 groups = ["default"]
 dependencies = [
     "wcwidth",
 ]
 files = [
-    {file = "prompt_toolkit-3.0.50-py3-none-any.whl", hash = "sha256:9b6427eb19e479d98acff65196a307c555eb567989e6d88ebbb1b509d9779198"},
-    {file = "prompt_toolkit-3.0.50.tar.gz", hash = "sha256:544748f3860a2623ca5cd6d2795e7a14f3d0e1c3c9728359013f79877fc89bab"},
+    {file = "prompt_toolkit-3.0.51-py3-none-any.whl", hash = "sha256:52742911fde84e2d423e2f9a4cf1de7d7ac4e51958f648d9540e0fb8db077b07"},
+    {file = "prompt_toolkit-3.0.51.tar.gz", hash = "sha256:931a162e3b27fc90c86f1b48bb1fb2c528c2761475e57c9c06de13311c7b54ed"},
 ]
 
 [[package]]
@@ -2605,7 +2605,7 @@ files = [
 
 [[package]]
 name = "snakemake"
-version = "9.1.11"
+version = "9.2.0"
 requires_python = ">=3.11"
 summary = "Workflow management system to create reproducible and scalable data analyses"
 groups = ["dev"]
@@ -2640,8 +2640,8 @@ dependencies = [
     "yte<2.0,>=1.5.5",
 ]
 files = [
-    {file = "snakemake-9.1.11-py3-none-any.whl", hash = "sha256:e52b02e397aed45c723ffd637686635319808eb789fd694d5501fccf49a5895b"},
-    {file = "snakemake-9.1.11.tar.gz", hash = "sha256:d2da29782b0d6ec23e75be93fcb91fc10465cff44f8ce8e1a7d83fccc3e43552"},
+    {file = "snakemake-9.2.0-py3-none-any.whl", hash = "sha256:fbdef69a007a66e238acd03731989b4a547c9432ba31f9a455f6dd588079d65e"},
+    {file = "snakemake-9.2.0.tar.gz", hash = "sha256:8ab617d4cf7fb8ad824d2cf5449659eb0e3ef49f3e353d73959d15cdfaa177ef"},
 ]
 
 [[package]]

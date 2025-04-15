@@ -2,9 +2,54 @@ import pickle
 import numpy as np
 import bmws.data
 import pandas as pd
+import matplotlib.pyplot as plt
+
 from bmws.estimate import estimate, empirical_bayes, sample_paths
 
 import jax
+
+
+def plot_trajectories(pop, outfile, s, s_samples, paths, data):
+    pop_cols = {
+        "EAS": ["#2F5233", "#B1D8B7", "#76B947"],
+        "EUR": ["#BBD2FD", "#63D5F9", "#2A67D6"],
+        "SAM": ["#B03437", "#5885AF"],
+        "SAS": ["#AE307F", "#6E2ED9"],
+        "AFR": ["#FF8247", "#CD853F", "#E8AD17"],
+    }
+    cols = pop_cols[pop]
+    K = len(cols)
+
+    high = np.quantile(s_samples, 0.05, axis=0)
+    low = np.quantile(s_samples, 0.95, axis=0)
+
+    fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
+    for k in range(K):
+        axs[0].plot(s[:, k], color=cols[k], alpha=1)
+        axs[0].fill_between(
+            range(s_samples.shape[2]), low[k], high[k], alpha=0.2, color=cols[k]
+        )
+
+    high = np.max(paths, axis=0)
+    low = np.min(paths, axis=0)
+    for k in range(K):
+        axs[1].plot(np.mean(paths, axis=0)[k][::-1], color=cols[k])
+        axs[1].fill_between(
+            range(paths.shape[2]), low[k][::-1], high[k][::-1], alpha=0.2, color=cols[k]
+        )
+
+    a, b = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
+        int(x[1]) for x, y in zip(data.obs, data.t) if x[0] > 0
+    ]
+    sns.regplot(x=a, y=b, logistic=True, ax=axs[2], color="black")
+
+    axs[0].set(xlabel="Generations before present", ylabel="Selection coefficient")
+    axs[1].set(xlabel="Generations before present", ylabel="Allele frequency")
+    axs[2].set(xlabel="Generations before present", ylabel="Observations")
+    # fig.suptitle(pop+": "+snp, y=1.1)
+    plt.tight_layout()
+    fig.savefig(outfile)
+
 
 def read_data(pop):
     pop = pop.lower()
@@ -109,7 +154,7 @@ def load_file(fn):
 
 
 wildcard_constraints:
-    population=r"\w+",
+    population=r"[A-Z]+",
     seed=r"\d+",
     snp=r"\w+",
 
@@ -207,6 +252,7 @@ rule resample:
     output:
         "results/{population}/{snp}/{stuff}/resample_{seed}.pkl",
     resources:
+        gpus=1,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -221,3 +267,31 @@ rule resample:
             paths, s, data, Ne, prior, rng, em_iterations, alpha, beta
         )
         dump_file(res, output[0])
+
+
+rule collect_resamples:
+    localrule: True
+    input:
+        expand("results/{{stuff}}/resample_{seed}.pkl", seed=range(10)),
+    output:
+        "results/{stuff}/resamples.pkl",
+    run:
+        ss = list(map(load_file, input))
+        S = np.stack([np.transpose(s) for s in ss], axis=0)
+        dump_file(S, output[0])
+
+
+rule plot:
+    input:
+        "results/{population}/data.pkl",
+        "results/{population}/{snp}/{stuff}/analyze.pkl",
+        "results/{population}/{snp}/{stuff}/paths.pkl",
+        "results/{population}/{snp}/{stuff}/resamples.pkl",
+    output:
+        config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
+    run:
+        data = load_file(input[0])
+        (s, prior, Ne), _ = load_file(input[1])
+        paths = load_file(input[2])
+        s_samples = load_file(input[3])
+        plot_trajectories(wildcards.population, output[0], s, s_samples, paths, data)
