@@ -3,6 +3,7 @@ import numpy as np
 import bmws.data
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from bmws.estimate import estimate, empirical_bayes, sample_paths
 
@@ -290,7 +291,9 @@ rule plot:
     output:
         config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
     run:
-        data = load_file(input[0])
+        jax.config.update('jax_platforms', 'cpu')
+        datasets, snps = load_file(input[0])
+        data = datasets[snps.index(wildcards.snp)]
         (s, prior, Ne), _ = load_file(input[1])
         paths = load_file(input[2])
         s_samples = load_file(input[3])
