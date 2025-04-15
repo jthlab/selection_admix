@@ -4,6 +4,7 @@ import bmws.data
 import pandas as pd
 from bmws.estimate import estimate, empirical_bayes, sample_paths
 
+import jax
 
 def read_data(pop):
     pop = pop.lower()
@@ -157,6 +158,7 @@ rule read_data:
     output:
         "results/{population}/data.pkl",
     run:
+        jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
         dump_file(res, output[0])
 
@@ -167,7 +169,9 @@ rule analyze:
     output:
         "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/analyze.pkl",
     resources:
-        gpus=1,
+        slurm_partition="spgpu,gpu",
+        slurm_extra="--gpus 1",
+        mem="16G",
     run:
         datasets, snps = load_file(input[0])
         wc = wildcards
@@ -203,7 +207,9 @@ rule resample:
     output:
         "results/{population}/{snp}/{stuff}/resample_{seed}.pkl",
     resources:
-        gpus=1,
+        slurm_partition="spgpu,gpu",
+        slurm_extra="--gpus 1",
+        mem="16G",
     run:
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
