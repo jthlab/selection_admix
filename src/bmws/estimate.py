@@ -31,10 +31,12 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
 
 
 def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
-    # s: [T, K]
-    ll = loglik(s, Ne, data, prior)
-    temporal_diff = jnp.sum(jnp.diff(s, axis=0) ** 2)
-    pairwise_diff = 0.5 * jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
+    # s: ((), [T, K])
+    s_bar, ds = s
+    assert ds.shape == Ne.shape
+    ll = loglik(s_bar + ds, Ne, data, prior)
+    temporal_diff = jnp.sum(jnp.diff(ds, axis=0) ** 2)
+    pairwise_diff = jnp.sum(ds**2)
     ret = -ll + alpha * temporal_diff + beta * pairwise_diff
     # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     jax.debug.print("ll:{} td:{} pd:{}", ll, temporal_diff, pairwise_diff)
@@ -77,10 +79,10 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
+        opt = jaxopt.LBFGSB(fun=_eb_loss)
         self._eb_opt = jit(opt.run)
 
-        opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
+        opt = jaxopt.LBFGSB(fun=_obj)
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
@@ -105,7 +107,7 @@ class _Optimizer:
         return ab, _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, alpha, beta, gamma, Ne, data, prior):
-        bounds = (jnp.full_like(s0, -0.2), jnp.full_like(s0, 0.2))
+        bounds = [jax.tree.map(lambda a: jnp.full_like(a, x), s0) for x in (-0.1, 0.1)]
         res = self._ll_opt(
             s0,
             bounds=bounds,
@@ -153,26 +155,9 @@ def jittable_estimate(obs, Ne, lam, prior, learning_rate=0.1, num_steps=100):
     return get_params(opt_state)
 
 
-def estimate_em(
-    obs: np.ndarray,
-    Ne: np.ndarray,
-    alpha,
-    beta,
-    gamma,
-    em_iterations: int = 3,
-    solver_options: dict = {},
-):
-    M = 100
-    s = np.zeros(len(obs) - 1)
-    for i in range(em_iterations):
-        prior = empirical_bayes(s, obs, Ne, M)
-        s = estimate(obs, Ne, lam=lam, prior=prior, solver_options=solver_options)
-
-    return s, prior
-
-
 def estimate(
     data: Dataset,
+    s0,
     Ne: np.ndarray,
     alpha,
     beta,
@@ -183,7 +168,6 @@ def estimate(
     assert prior.a.shape[0] == data.K
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
-    s0 = np.zeros([data.T, data.K])
     return opt.run_ll(
         s0=s0, Ne=Ne, alpha=alpha, beta=beta, gamma=gamma, data=data, prior=prior
     )
@@ -287,7 +271,6 @@ def _sample_path(
         keys = jax.random.split(key, 3)
         init = (x_i1, keys[1], 0, 0)
         x, _, a, _ = lax.while_loop(cond, mh, init)
-        # jax.debug.print("init:{} x1:{} x:{} Ne_i:{} s_i:{} t:{} a:{} i:{}", init[0], x_i1, x, Ne_i, s_i, t, a, i)
         return (keys[2], x, Ne_i, beta_i), x
 
     mask = jnp.append(data.t[1:] != data.t[:-1], True)

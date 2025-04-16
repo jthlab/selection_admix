@@ -96,7 +96,7 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
     M = 100
     Ne = np.full([data.T, data.K], 1e4)
     Ne_fit = Ne
-    s = np.zeros([data.T, data.K])
+    s = (0.0, np.zeros([data.T, data.K]))
     ab = np.ones([2, data.K]) + 1e-4
     estimate_kwargs = {"alpha": alpha, "beta": beta, "gamma": gamma}
 
@@ -106,7 +106,7 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
         print("Iteration " + str(i))
         print("estimate_kwargs " + str(estimate_kwargs))
         ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
-        s = estimate(data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
+        s = estimate(s0=s, data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
     return s, prior, Ne
 
 
@@ -181,7 +181,7 @@ rule all:
 
 rule read_data_test:
     output:
-        "results/test_test/data.pkl",
+        "results/TEST/data.pkl",
     run:
         ds = bmws.data.Dataset.from_records(
             [
@@ -197,7 +197,8 @@ rule read_data_test:
                 dict(t=0, theta=np.array([0.2, 0.2, 0.6]), obs=(4, 1)),
             ]
         )
-        dump_file(ds, output[0])
+        snps = ["test"]
+        dump_file(([ds], snps), output[0])
 
 
 rule read_data:
@@ -240,7 +241,8 @@ rule sample_paths:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        (s, prior, Ne), _ = load_file(input[1])
+        ((s_bar, ds), prior, Ne), _ = load_file(input[1])
+        s = s_bar + ds
         res = sample_paths(s, Ne, data, prior, 100)
         dump_file(res, output[0])
 
@@ -260,10 +262,13 @@ rule resample:
     run:
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        (s, prior, Ne), (alpha, beta, gamma, em_iterations) = load_file(input[1])
+        ((s_bar, ds), prior, Ne), (alpha, beta, gamma, em_iterations) = load_file(
+            input[1]
+        )
         paths = load_file(input[2])
         seed = int(wildcards.seed)
         rng = np.random.default_rng(seed)
+        s = s_bar + ds
         res = resample_individuals(
             paths, s, data, Ne, prior, rng, em_iterations, alpha, beta
         )

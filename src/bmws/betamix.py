@@ -399,8 +399,6 @@ def _forward_helper(accum, tup):
     )
     ll = ll0 + ll1
     accum = (beta2, ll, datum.t, key)
-    # jax.debug.print("i:{} beta1:{} beta2:{}", i, beta1, beta2)
-    # eqx.error_if(beta2, jnp.isnan(beta2.log_p).any(), msg="nan in beta2")
     return accum, beta2
 
 
