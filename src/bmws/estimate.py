@@ -284,7 +284,7 @@ def _sample_path(
     ]
 
     @jit
-    def sample_beta(beta0, betas, Ne, s):
+    def sample_beta(beta0, betas, Ne, s, key):
         keys = jax.random.split(key, 2)
         x0 = beta0.sample(keys[0])
         init = (keys[1], x0, Ne[t[-1]], beta0)
@@ -292,5 +292,6 @@ def _sample_path(
         _, samples = lax.scan(f, init, seq, reverse=True)
         return samples
 
-    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1))(beta_last, betas, Ne, s)
+    keys = jax.random.split(key, Ne.shape[1])
+    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1, 0))(beta_last, betas, Ne, s, keys)
     return samples

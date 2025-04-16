@@ -283,7 +283,7 @@ rule collect_resamples:
         "results/{stuff}/resamples.pkl",
     run:
         ss = list(map(load_file, input))
-        S = np.stack([np.transpose(s) for s in ss], axis=0)
+        S = np.stack([np.transpose(sbar + ds) for sbar, ds in ss], axis=0)
         dump_file(S, output[0])
 
 
@@ -295,11 +295,13 @@ rule plot:
         "results/{population}/{snp}/{stuff}/resamples.pkl",
     output:
         config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
+    localrule: True
     run:
         jax.config.update('jax_platforms', 'cpu')
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        (s, prior, Ne), _ = load_file(input[1])
+        ((s_bar, ds), prior, Ne), _ = load_file(input[1])
+        s = s_bar + ds
         paths = load_file(input[2])
         s_samples = load_file(input[3])
         plot_trajectories(wildcards.population, output[0], s, s_samples, paths, data)
