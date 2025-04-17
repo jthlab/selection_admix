@@ -243,7 +243,7 @@ rule sample_paths:
         data = datasets[snps.index(wildcards.snp)]
         ((s_bar, ds), prior, Ne), _ = load_file(input[1])
         s = s_bar + ds
-        res = sample_paths(s, Ne, data, prior, 100)
+        res = sample_paths(s, Ne, data, prior, 10)
         dump_file(res, output[0])
 
 

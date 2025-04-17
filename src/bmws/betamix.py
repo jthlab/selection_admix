@@ -364,16 +364,44 @@ def _binom_sampling_admix(
     """
     fs0 = fs
     M = fs.M
+    K = fs.log_p.shape[0]
     n, d = datum.obs
     assert fs.log_p.ndim == 2
     fs1, llk = vmap(_binom_sampling, (None, None, 0))(n, d, fs)
     log_lam = llk + jnp.log(datum.theta)
     ll = safe_logsumexp(log_lam)
-    log_lam -= ll
-    log_lam = log_lam.clip(max=-1e-8)  # prevent nans if lam=1 for one pop
-    lam = jnp.exp(log_lam)
-    # log_lam = eqx.debug.backward_nan(log_lam, "ll")
-    fs2, _ = vmap(_binom_sampling)(n * lam, d * lam, fs)
+    # now compute posteriors
+
+    def combine(f0, f1, log_theta, log_v):
+        # posterior, f(p) \propto f_0(p) [theta*binom(n,d)*p^d(1-p)^n-d + v]
+        # = theta*f1(p) + v*f0(p),  (v = \sum_{-i} theta_j ll_j)
+        a1 = jnp.concatenate([f1.f_x.a, f0.f_x.a])
+        b1 = jnp.concatenate([f1.f_x.b, f0.f_x.b])
+        log_c1 = jnp.concatenate([log_theta + f1.f_x.log_c, log_v + f0.f_x.log_c])
+        bm0 = BetaMixture(a1, b1, log_c1)
+        bm1 = BetaMixture.interpolate(
+            lambda x: bm0(x, log=True), 10 * M, norm=True, log_f=True
+        ).top_k(M)
+        # now compute updated spike probabilities
+        # now compute updated spike probabilities
+        # log p(p=0|data) = log p(data|p=0) + log p(p=0) - log p(data)
+        #                 = log[theta * 1{n=d=0} + v] + log p(p=0) - log p(data)
+        zn = jnp.array([0, n])
+        log_p1 = (
+            vmap(safe_lae, (0, None))(
+                jnp.where((n > 0) & (d == zn), log_theta, -jnp.inf), log_v
+            )
+            + f0.log_p
+            - ll
+        )
+        return SpikedBeta.safe_init(log_p1, bm1)
+
+    # log_V[i] = \sum_{-i} theta_j ll_j
+    dp = partial(jnp.delete, log_lam, assume_unique_indices=True)
+    log_Vj = vmap(dp)(jnp.arange(K))
+    log_V = vmap(safe_logsumexp)(log_Vj)
+    fs2 = vmap(combine)(fs0, fs1, jnp.log(datum.theta), log_V)
+    # jax.debug.print("datum:{} llk:{} log_V:{} fs2.log_p:{} fs2.mean:{}", datum, llk, log_V, fs2.log_p, fs2.mean, ordered=True)
     return fs2, ll
 
 

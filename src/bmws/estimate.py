@@ -79,10 +79,10 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.LBFGSB(fun=_eb_loss)
+        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
         self._eb_opt = jit(opt.run)
 
-        opt = jaxopt.LBFGSB(fun=_obj)
+        opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
@@ -293,5 +293,7 @@ def _sample_path(
         return samples
 
     keys = jax.random.split(key, Ne.shape[1])
-    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1, 0))(beta_last, betas, Ne, s, keys)
+    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1, 0))(
+        beta_last, betas, Ne, s, keys
+    )
     return samples
