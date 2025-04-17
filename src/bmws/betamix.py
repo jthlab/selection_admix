@@ -125,8 +125,7 @@ class BetaMixture(NamedTuple):
 
     def top_k(self, k):
         """Return the top k components of the mixture"""
-        i = self.log_c.argsort()[-k:]
-        log_c = self.log_c[i]
+        log_c, i = lax.top_k(self.log_c, k)
         log_c -= logsumexp(log_c)
         return BetaMixture(self.a[i], self.b[i], log_c)
 
