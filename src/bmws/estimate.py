@@ -86,6 +86,16 @@ class _Optimizer:
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
+        # prevent weak_type so that compiles only happen once
+        print(ab0, s, Ne, alpha, beta)
+        ab0, s, Ne, alpha, beta = jax.tree.map(
+            lambda a: jnp.asarray(a, dtype=jnp.float64), (ab0, s, Ne, alpha, beta)
+        )
+        data = data._replace(
+            t=jnp.asarray(data.t, dtype=jnp.int64),
+            theta=jnp.asarray(data.theta, dtype=jnp.float64),
+            obs=jnp.asarray(data.obs, dtype=jnp.int64),
+        )
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
         ub = jnp.full_like(ab0, 100.0)
         bounds = (lb, ub)
@@ -107,6 +117,15 @@ class _Optimizer:
         return ab, _interp(a_star, b_star, self.M)
 
     def run_ll(self, s0, alpha, beta, gamma, Ne, data, prior):
+        s0, Ne, alpha, beta, gamma, prior = jax.tree.map(
+            lambda a: jnp.asarray(a, dtype=jnp.float64),
+            (s0, Ne, alpha, beta, gamma, prior),
+        )
+        data = data._replace(
+            t=jnp.asarray(data.t, dtype=jnp.int64),
+            theta=jnp.asarray(data.theta, dtype=jnp.float64),
+            obs=jnp.asarray(data.obs, dtype=jnp.int64),
+        )
         bounds = [jax.tree.map(lambda a: jnp.full_like(a, x), s0) for x in (-0.1, 0.1)]
         res = self._ll_opt(
             s0,
@@ -123,6 +142,7 @@ class _Optimizer:
     @classmethod
     def factory(cls, M: int) -> "_Optimizer":
         if cls._instance is None:
+            logger.debug("creating new optimizer")
             cls._instance = _Optimizer(M)
         return cls._instance
 

@@ -334,6 +334,7 @@ def _binom_sampling(n, d, f: SpikedBeta):
     log_p_data_comp_cont = jnp.where(
         jnp.isneginf(log_c),
         -jnp.inf,
+        # beta binomial pmf
         log_c + betaln(a1, b1) - betaln(a, b) + _logbinom(n, d),
     )
     log_p_data_cont = safe_logsumexp(log_p_data_comp_cont)
@@ -379,9 +380,16 @@ def _binom_sampling_admix(
         b1 = jnp.concatenate([f1.f_x.b, f0.f_x.b])
         log_c1 = jnp.concatenate([log_theta + f1.f_x.log_c, log_v + f0.f_x.log_c])
         bm0 = BetaMixture(a1, b1, log_c1)
-        bm1 = BetaMixture.interpolate(
-            lambda x: bm0(x, log=True), 10 * M, norm=True, log_f=True
-        ).top_k(M)
+
+        # this is memory hungry
+        @jax.remat
+        def f(bm):
+            return BetaMixture.interpolate(
+                lambda x: bm0(x, log=True), 10 * M, norm=True, log_f=True
+            ).top_k(M)
+
+        bm1 = f(bm0)
+
         # now compute updated spike probabilities
         # now compute updated spike probabilities
         # log p(p=0|data) = log p(data|p=0) + log p(p=0) - log p(data)
