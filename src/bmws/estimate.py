@@ -30,9 +30,14 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
+@jit
+def _obj(
+    s, Ne, data: Dataset, prior: BetaMixture, alpha, beta, _no_sbar=False, _no_ds=False
+):
     # s: ((), [T, K])
     s_bar, ds = s
+    s_bar = jnp.where(_no_sbar, lax.stop_gradient(s_bar), s_bar)
+    ds = jnp.where(_no_ds, lax.stop_gradient(ds), ds)
     assert ds.shape == Ne.shape
     ll = loglik(s_bar + ds, Ne, data, prior)
     temporal_diff = jnp.sum(jnp.diff(ds, axis=0) ** 2)
@@ -79,10 +84,10 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
+        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=100, maxls=50)
         self._eb_opt = jit(opt.run)
 
-        opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
+        opt = jaxopt.LBFGSB(fun=_obj, maxiter=100, maxls=50)
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
@@ -127,6 +132,23 @@ class _Optimizer:
             obs=jnp.asarray(data.obs, dtype=jnp.int64),
         )
         bounds = [jax.tree.map(lambda a: jnp.full_like(a, x), s0) for x in (-0.1, 0.1)]
+        # 1d optimization
+        _, ds = s0
+
+        def f(sbar):
+            s = (sbar, ds)
+            return _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
+
+        res = scipy.optimize.minimize_scalar(
+            f,
+            method="bounded",
+            bounds=(-0.1, 0.1),
+            options={"disp": True},
+        )
+        logger.debug("sbar result: {}", res)
+        sbar = res.x
+        s0 = (sbar, ds)
+
         res = self._ll_opt(
             s0,
             bounds=bounds,
@@ -135,6 +157,8 @@ class _Optimizer:
             Ne=Ne,
             data=data,
             prior=prior,
+            _no_sbar=True,
+            _no_ds=False,
         )
         logger.debug("MLE result: {}", res)
         return res.params
@@ -189,7 +213,13 @@ def estimate(
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
     return opt.run_ll(
-        s0=s0, Ne=Ne, alpha=alpha, beta=beta, gamma=gamma, data=data, prior=prior
+        s0=s0,
+        Ne=Ne,
+        alpha=alpha,
+        beta=beta,
+        gamma=gamma,
+        data=data,
+        prior=prior,
     )
 
 
@@ -291,7 +321,7 @@ def _sample_path(
         keys = jax.random.split(key, 3)
         init = (x_i1, keys[1], 0, 0)
         x, _, a, j = lax.while_loop(cond, mh, init)
-        jax.debug.print("x[{}]:{} x[{}]:{} a:{} j:{}", i+1, x_i1, i, x, a, j)
+        jax.debug.print("x[{}]:{} x[{}]:{} a:{} j:{}", i + 1, x_i1, i, x, a, j)
         return (keys[2], x, Ne_i, beta_i), x
 
     mask = jnp.append(data.t[1:] != data.t[:-1], True)
