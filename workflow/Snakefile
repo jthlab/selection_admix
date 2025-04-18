@@ -112,7 +112,7 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
     return s, prior, Ne
 
 
-def resample_individuals(s, data, Ne, prior, rng, em_iterations, alpha, beta):
+def resample_individuals(data, rng, em_iterations, alpha, beta):
     # Now resample observations
     t = data.t
     theta = data.theta
@@ -212,13 +212,20 @@ rule read_data:
         dump_file(res, output[0])
 
 
+def _params(wc):
+    alpha = 10 ** float(wc.log_alpha)
+    beta = 10 ** float(wc.log_beta)
+    em_iterations = int(wc.em_iterations)
+    return alpha, beta, em_iterations
+
+
 rule analyze:
     input:
         "results/{population}/data.pkl",
     output:
         "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/analyze.pkl",
     resources:
-        runtime=240,
+        runtime=720,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -226,9 +233,7 @@ rule analyze:
         datasets, snps = load_file(input[0])
         wc = wildcards
         data = datasets[snps.index(wc.snp)]
-        alpha = 10 ** float(wc.log_alpha)
-        beta = 10 ** float(wc.log_beta)
-        em_iterations = int(wc.em_iterations)
+        alpha, beta, em_iterations = _params(wildcards)
         gamma = 0.0
         res = run_analysis(data, alpha, beta, gamma, em_iterations)
         dump_file((res, (alpha, beta, gamma, em_iterations)), output[0])
@@ -253,27 +258,21 @@ rule sample_paths:
 rule resample:
     input:
         "results/{population}/data.pkl",
-        "results/{population}/{snp}/{stuff}/analyze.pkl",
     output:
-        "results/{population}/{snp}/{stuff}/resample_{seed}.pkl",
+        "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/resample_{seed}.pkl",
     resources:
         gpus=1,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
-        runtime=240,
+        runtime=720,
     run:
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        ((s_bar, ds), prior, Ne), (alpha, beta, gamma, em_iterations) = load_file(
-            input[1]
-        )
+        alpha, beta, em_iterations = _params(wildcards)
         seed = int(wildcards.seed)
         rng = np.random.default_rng(seed)
-        s = s_bar + ds
-        res = resample_individuals(
-            s, data, Ne, prior, rng, em_iterations, alpha, beta
-        )
+        res = resample_individuals(data, rng, em_iterations, alpha, beta)
         dump_file(res, output[0])
 
 
@@ -299,7 +298,7 @@ rule plot:
         config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
     localrule: True
     run:
-        jax.config.update('jax_platforms', 'cpu')
+        jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
         ((s_bar, ds), prior, Ne), _ = load_file(input[1])
