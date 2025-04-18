@@ -272,25 +272,26 @@ def _sample_path(
             return log_q(x) + jax.scipy.stats.binom.logpmf(k, N, y)
 
         def cond(tup):
-            x_t, key, a, i = tup
-            return (a < 100) & (i < 10_000)
+            x_t, key, a, j = tup
+            return (a < 20) & (j < 10_000)
 
         spikes = [k == 0, k == N]
         sample_q = partial(beta_star.sample, spikes=spikes)
 
         def mh(tup):
-            x_t, key, a, i = tup
+            x_t, key, a, j = tup
             keys = jax.random.split(key, 3)
             x_prime = sample_q(keys[0])
             log_alpha = log_pi(x_prime) - log_pi(x_t) + log_q(x_t) - log_q(x_prime)
             # U < alpha => log(u) < log_alpha => exp(1) > -log(alpha)
             accept = jax.random.exponential(keys[1]) > -log_alpha
             x_t1 = jnp.where(accept, x_prime, x_t)
-            return (x_t1, keys[2], a + accept, i + 1)
+            return (x_t1, keys[2], a + accept, j + 1)
 
         keys = jax.random.split(key, 3)
         init = (x_i1, keys[1], 0, 0)
-        x, _, a, _ = lax.while_loop(cond, mh, init)
+        x, _, a, j = lax.while_loop(cond, mh, init)
+        jax.debug.print("x[{}]:{} x[{}]:{} a:{} j:{}", i+1, x_i1, i, x, a, j)
         return (keys[2], x, Ne_i, beta_i), x
 
     mask = jnp.append(data.t[1:] != data.t[:-1], True)
@@ -303,7 +304,6 @@ def _sample_path(
         jax.tree.map(lambda a: a[sl], betas) for sl in (-1, slice(None, -1))
     ]
 
-    @jit
     def sample_beta(beta0, betas, Ne, s, key):
         keys = jax.random.split(key, 2)
         x0 = beta0.sample(keys[0])

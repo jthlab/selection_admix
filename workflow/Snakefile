@@ -31,6 +31,8 @@ def plot_trajectories(pop, outfile, s, s_samples, paths, data):
             range(s_samples.shape[2]), low[k], high[k], alpha=0.2, color=cols[k]
         )
 
+    axs[0].set_ylim(0.0, 0.1)
+
     high = np.max(paths, axis=0)
     low = np.min(paths, axis=0)
     for k in range(K):
@@ -110,7 +112,7 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
     return s, prior, Ne
 
 
-def resample_individuals(paths, s, data, Ne, prior, rng, em_iterations, alpha, beta):
+def resample_individuals(s, data, Ne, prior, rng, em_iterations, alpha, beta):
     # Now resample observations
     t = data.t
     theta = data.theta
@@ -216,6 +218,7 @@ rule analyze:
     output:
         "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/analyze.pkl",
     resources:
+        runtime=240,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -251,7 +254,6 @@ rule resample:
     input:
         "results/{population}/data.pkl",
         "results/{population}/{snp}/{stuff}/analyze.pkl",
-        "results/{population}/{snp}/{stuff}/paths.pkl",
     output:
         "results/{population}/{snp}/{stuff}/resample_{seed}.pkl",
     resources:
@@ -259,18 +261,18 @@ rule resample:
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
+        runtime=240,
     run:
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
         ((s_bar, ds), prior, Ne), (alpha, beta, gamma, em_iterations) = load_file(
             input[1]
         )
-        paths = load_file(input[2])
         seed = int(wildcards.seed)
         rng = np.random.default_rng(seed)
         s = s_bar + ds
         res = resample_individuals(
-            paths, s, data, Ne, prior, rng, em_iterations, alpha, beta
+            s, data, Ne, prior, rng, em_iterations, alpha, beta
         )
         dump_file(res, output[0])
 
