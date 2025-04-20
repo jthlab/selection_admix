@@ -84,10 +84,10 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=100, maxls=50)
+        opt = jaxopt.LBFGSB(fun=_eb_loss, tol=0.1)
         self._eb_opt = jit(opt.run)
 
-        opt = jaxopt.LBFGSB(fun=_obj, maxiter=100, maxls=50)
+        opt = jaxopt.LBFGSB(fun=_obj, tol=0.1)
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):

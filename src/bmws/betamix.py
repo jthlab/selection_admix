@@ -409,7 +409,6 @@ def _binom_sampling_admix(
     log_Vj = vmap(dp)(jnp.arange(K))
     log_V = vmap(safe_logsumexp)(log_Vj)
     fs2 = vmap(combine)(fs0, fs1, jnp.log(datum.theta), log_V)
-    # jax.debug.print("datum:{} llk:{} log_V:{} fs2.log_p:{} fs2.mean:{}", datum, llk, log_V, fs2.log_p, fs2.mean, ordered=True)
     return fs2, ll
 
 
