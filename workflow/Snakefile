@@ -249,8 +249,7 @@ rule sample_paths:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        ((s_bar, ds), prior, Ne), _ = load_file(input[1])
-        s = s_bar + ds
+        (s, prior, Ne), _ = load_file(input[1])
         res = sample_paths(s, Ne, data, prior, 10)
         dump_file(res, output[0])
 
@@ -306,3 +305,11 @@ rule plot:
         paths = load_file(input[2])
         s_samples = load_file(input[3])
         plot_trajectories(wildcards.population, output[0], s, s_samples, paths, data)
+
+rule altplot:
+    input:
+        config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
+    output:
+        "results/{population}/{snp}/{stuff}/plot.pdf"
+    shell:
+        "cp {input} {output}"

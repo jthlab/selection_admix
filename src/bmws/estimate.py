@@ -30,14 +30,9 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
     return u @ jnp.diag(s_hat) @ vt
 
 
-@jit
-def _obj(
-    s, Ne, data: Dataset, prior: BetaMixture, alpha, beta, _no_sbar=False, _no_ds=False
-):
+def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
     # s: ((), [T, K])
     s_bar, ds = s
-    s_bar = jnp.where(_no_sbar, lax.stop_gradient(s_bar), s_bar)
-    ds = jnp.where(_no_ds, lax.stop_gradient(ds), ds)
     assert ds.shape == Ne.shape
     ll = loglik(s_bar + ds, Ne, data, prior)
     temporal_diff = jnp.sum(jnp.diff(ds, axis=0) ** 2)
@@ -84,10 +79,10 @@ class _Optimizer:
             jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
             return ret
 
-        opt = jaxopt.LBFGSB(fun=_eb_loss, tol=0.1)
+        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
         self._eb_opt = jit(opt.run)
 
-        opt = jaxopt.LBFGSB(fun=_obj, tol=0.1)
+        opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
         self._ll_opt = jit(opt.run)
 
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
@@ -132,23 +127,6 @@ class _Optimizer:
             obs=jnp.asarray(data.obs, dtype=jnp.int64),
         )
         bounds = [jax.tree.map(lambda a: jnp.full_like(a, x), s0) for x in (-0.1, 0.1)]
-        # 1d optimization
-        _, ds = s0
-
-        def f(sbar):
-            s = (sbar, ds)
-            return _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
-
-        res = scipy.optimize.minimize_scalar(
-            f,
-            method="bounded",
-            bounds=(-0.1, 0.1),
-            options={"disp": True},
-        )
-        logger.debug("sbar result: {}", res)
-        sbar = res.x
-        s0 = (sbar, ds)
-
         res = self._ll_opt(
             s0,
             bounds=bounds,
@@ -157,8 +135,6 @@ class _Optimizer:
             Ne=Ne,
             data=data,
             prior=prior,
-            _no_sbar=True,
-            _no_ds=False,
         )
         logger.debug("MLE result: {}", res)
         return res.params
@@ -213,13 +189,7 @@ def estimate(
     M = prior.a.shape[1]
     opt = _Optimizer.factory(M)
     return opt.run_ll(
-        s0=s0,
-        Ne=Ne,
-        alpha=alpha,
-        beta=beta,
-        gamma=gamma,
-        data=data,
-        prior=prior,
+        s0=s0, Ne=Ne, alpha=alpha, beta=beta, gamma=gamma, data=data, prior=prior
     )
 
 
