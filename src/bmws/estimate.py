@@ -12,11 +12,19 @@ from jax import jacfwd, jit, lax
 from jax import numpy as jnp
 from jax import value_and_grad, vmap
 from jax.example_libraries.optimizers import adagrad
-from jax.scipy.special import betaln, xlog1py, xlogy
+from jax.scipy.special import betaln, logsumexp, xlog1py, xlogy
 from loguru import logger
 from scipy.optimize import minimize
 
-from bmws.betamix import BetaMixture, SpikedBeta, _construct_prior, forward, loglik
+from bmws.betamix import (
+    BetaMixture,
+    SpikedBeta,
+    _construct_prior,
+    _transition,
+    forward,
+    loglik,
+    safe_lae,
+)
 from bmws.data import Dataset
 
 
@@ -235,7 +243,7 @@ def sample_paths(
     betas, _ = forward(s, Ne, data, prior)
 
     def f(key):
-        return _sample_path(betas, s, Ne, data, prior, key)
+        return _sample_path(betas, s, Ne[0, 0].astype(int), data, prior, key)
 
     return jax.vmap(f)(keys)
 
@@ -243,56 +251,43 @@ def sample_paths(
 def _sample_path(
     betas,
     s: np.ndarray,
-    Ne: np.ndarray,
+    N: int,
     data: Dataset,
     prior: BetaMixture,
     key,
 ):
+
+    # joint distribution of k_[t-1] and k_t
+    K = jnp.arange(N + 1)
+
     def f(accum, seq):
-        key, x_i1, Ne_i1, beta_i1 = accum
-        beta_i, Ne_i, s_i, i, t = seq
-        # sampling
-        k = x_i1 * Ne_i1
-        N = Ne_i1
-        # sample from pdf which is proportional to beta_i(x) * p(x_i1 | x_i = x)
-        # - use metropolis hastings since I don't know how to sample from this distribution
-        # - we have p(x_i1 | x_i = x) = binom(N_i1 * x_i1; N_i1; f(x)) \propto f(x)^k (1-f(x))^(Ni1-k)
-        #   where f(x) is the selectino operator.
-        # - if s=0 then f(x)=x so the target density is just proportional to a beta mixture
-        # - so use this as the base measure
-        f_x_star = beta_i.f_x._replace(a=beta_i.f_x.a + k, b=beta_i.f_x.b + Ne_i1 - k)
-        beta_star = beta_i._replace(f_x=f_x_star)
+        key, k_i1, beta_i1 = accum
+        beta_i, s_i, i, t = seq
 
-        # proposal distribution
-        log_q = partial(beta_star, log=True)
+        # sample from joint distribution:
+        # p(k_i, k_i1) = betabinom(beta1, k_i) * log
 
-        def log_pi(x):
-            # target distribution
-            y = (1 + s_i / 2) * x / (1 + s_i / 2 * x)
-            return log_q(x) + jax.scipy.stats.binom.logpmf(k, N, y)
+        def log_p(k):
+            # probability of k[i+1] given k[i]
+            x = k / N
+            p = (1 + s_i / 2) * x / (1 + s_i / 2 * x)
+            r1 = jax.scipy.stats.binom.logpmf(k_i1, N, p)
+            # probability of k[i]
+            r2 = (
+                beta_i.log_r
+                + beta_i.f_x.log_c
+                + jax.scipy.stats.betabinom.logpmf(k, N, beta_i.f_x.a, beta_i.f_x.b)
+            )
+            r2 = r2.at[0].set(safe_lae(r2[0], beta_i.log_p[0]))
+            r2 = r2.at[-1].set(safe_lae(r2[-1], beta_i.log_p[1]))
+            r2 = logsumexp(r2)
+            # overall probability
+            return r1 + r2
 
-        def cond(tup):
-            x_t, key, a, j = tup
-            return (a < 20) & (j < 10_000)
-
-        spikes = [k == 0, k == N]
-        sample_q = partial(beta_star.sample, spikes=spikes)
-
-        def mh(tup):
-            x_t, key, a, j = tup
-            keys = jax.random.split(key, 3)
-            x_prime = sample_q(keys[0])
-            log_alpha = log_pi(x_prime) - log_pi(x_t) + log_q(x_t) - log_q(x_prime)
-            # U < alpha => log(u) < log_alpha => exp(1) > -log(alpha)
-            accept = jax.random.exponential(keys[1]) > -log_alpha
-            x_t1 = jnp.where(accept, x_prime, x_t)
-            return (x_t1, keys[2], a + accept, j + 1)
-
-        keys = jax.random.split(key, 3)
-        init = (x_i1, keys[1], 0, 0)
-        x, _, a, j = lax.while_loop(cond, mh, init)
-        jax.debug.print("x[{}]:{} x[{}]:{} a:{} j:{}", i + 1, x_i1, i, x, a, j)
-        return (keys[2], x, Ne_i, beta_i), x
+        lp = vmap(log_p)(K)
+        key, subkey = jax.random.split(key)
+        k = jax.random.categorical(subkey, lp)
+        return (key, k, beta_i), (t, k / N)
 
     mask = jnp.append(data.t[1:] != data.t[:-1], True)
     t = data.t[mask]
@@ -304,16 +299,15 @@ def _sample_path(
         jax.tree.map(lambda a: a[sl], betas) for sl in (-1, slice(None, -1))
     ]
 
-    def sample_beta(beta0, betas, Ne, s, key):
+    def sample_beta(beta0, betas, s, key):
         keys = jax.random.split(key, 2)
-        x0 = beta0.sample(keys[0])
-        init = (keys[1], x0, Ne[t[-1]], beta0)
-        seq = (betas, Ne[t[:-1]], s[t[:-1]], jnp.arange(len(t) - 1), t[:-1])
-        _, samples = lax.scan(f, init, seq, reverse=True)
-        return samples
+        p0 = beta0.sample(keys[0])
+        k0 = jax.random.binomial(keys[0], N, p0).astype(int)
+        init = (keys[1], k0, beta0)
+        seq = (betas, s[t[:-1]], jnp.arange(len(t) - 1), t[:-1])
+        _, (tt, samples) = lax.scan(f, init, seq, reverse=True)
+        return jnp.append(samples, k0 / N)
 
-    keys = jax.random.split(key, Ne.shape[1])
-    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 1, 0))(
-        beta_last, betas, Ne, s, keys
-    )
-    return samples
+    keys = jax.random.split(key, s.shape[1])
+    samples = jax.vmap(sample_beta, in_axes=(0, 1, 1, 0))(beta_last, betas, s, keys)
+    return samples[..., ::-1]
