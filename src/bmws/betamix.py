@@ -1,9 +1,11 @@
 "beta mixture with spikes model"
 import os
+from dataclasses import dataclass, field
 from functools import partial
 from typing import NamedTuple, Union
 
 import equinox as eqx
+import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,6 +14,18 @@ from jax.scipy.special import betaln, digamma, gammaln, logsumexp, xlog1py, xlog
 from loguru import logger
 
 from bmws.data import Dataset
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Selection:
+    T: float = field(metadata=dict(static=True))
+    s: jnp.ndarray
+
+    def __call__(self, xq, derivative=0):
+        M = len(self.s)
+        t = jnp.linspace(0, self.T, M)
+        return interpax.interp1d(xq, t, self.s, extrap=True)
 
 
 def log1mexp(x):
@@ -106,6 +120,10 @@ def _wf_trans(s, N, a, b):
         )
     ) / (4.0 * (a + b) ** 2 * (1 + a + b) ** 2 * (2 + a + b) * (3 + a + b))
     var = Evar + varE
+    return _inv_beta(mean, var)
+
+
+def _inv_beta(mean, var):
     u = mean * (1 - mean) / var - 1
     a = mean * u
     b = (1 - mean) * u
@@ -258,17 +276,19 @@ class SpikedBeta(NamedTuple):
     #     p = self.p
     #     return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[0]
 
-    # def EX2(self):
-    #     p = self.p
-    #     return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[1]
-
-    # def var(self):
-    #     return self.EX2() - self.mean()**2
-
     @property
     def mean(self):
         p = jnp.exp(self.log_p)
         return p @ jnp.array([0.0, 1.0]) + (1 - p.sum(-1)) * self.f_x.mean
+
+    @property
+    def EX2(self):
+        p = jnp.exp(self.log_p)
+        return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[1]
+
+    @property
+    def var(self):
+        return self.EX2 - self.mean**2
 
     @property
     def log_r(self):
@@ -297,30 +317,48 @@ def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
     """Given a prior distribution on population allele frequency, compute posterior after
     one round of WF mating."""
 
-    @partial(vmap, in_axes=(0, 0, 0))
-    def lp(fi, si, Nei):
+    @vmap
+    def lp(fi, si):
         # compute update spike probabilities and wf transition
+        # mu = fi.mean
+        # sigma2 = fi.var
+        # a0, b0 = _inv_beta(mu, sigma2)
+        # a1, b1 = _wf_trans(si, Nei, a0, b0)
+        # D = jnp.sqrt(
+        #     jnp.sum((fi.f_x.a - a1) ** 2 + (fi.f_x.b - b1) ** 2))
+        #
+        # log_p = -D
+        # log_p -= logsumexp(log_p)
+        # log_c1 = fi.f_x.log_c + log_p
+        # log_c1 -= logsumexp(log_p)
+        # log_c1 = eqx.error_if(log_c1, jnp.isnan(log_c1), "log_c1 nan")
+
+        # jax.debug.print("mu:{} sigma2:{} a0:{} a1:{} D:{} log_c1:{}", mu, sigma2, a0, a1, D, log_c1, ordered=True)
+        # return fi._replace(
+        #     f_x=fi.f_x._replace(log_c=log_c1)
+        # )
         log_p, (a, b, log_c) = fi
         assert log_p.shape == (2,)
         log_r = fi.log_r
-        x = jnp.array([0, Nei])[:, None]  # [2, 1]
+        x = jnp.array([0, Ne])[:, None]  # [2, 1]
         # probability mass for fixation. p(af=0) = p0 + (1-p0-p1) * \int_0^1 f(x) (1-x)^n, and similarly for p1
         log_p_c = log_r + logsumexp(
-            log_c + betaln(x + a, Nei - x + b) - betaln(a, b), axis=1
+            log_c + betaln(x + a, Ne - x + b) - betaln(a, b), axis=1
         )  # [2] probability of loss or fixation in continuous component
         log_p1 = safe_lae(log_p, log_p_c)
-        a1, b1 = _wf_trans(si, Nei, a, b)
+        a1, b1 = _wf_trans(si, Ne, a, b)
         EX0 = jnp.isclose(b1, -1.0)
         EX1 = jnp.isclose(a1, -1.0)
         log_p2_0 = safe_lae(log_p1[0], safe_logsumexp(jnp.where(EX0, log_c, -jnp.inf)))
         log_p2_1 = safe_lae(log_p1[1], safe_logsumexp(jnp.where(EX1, log_c, -jnp.inf)))
         log_p2 = jnp.array([log_p2_0, log_p2_1])
         log_c = jnp.where(EX0 | EX1, -jnp.inf, log_c)
+        log_c1 = fi.f_x.log_c
         return SpikedBeta.safe_init(log_p2, BetaMixture(a1, b1, log_c))
 
     assert f.log_p.ndim == 2
     assert f.log_p.shape[1] == 2
-    ret = lp(f, s, Ne)
+    ret = lp(f, s)
     return ret
 
 
@@ -416,12 +454,12 @@ def _tree_where(cond, a, b):
     return jax.tree.map(partial(jnp.where, cond), a, b)
 
 
-def _forward_helper(accum, tup):
+def _forward_helper(accum, tup, Ne):
     beta0, ll0, last_t, key = accum
-    datum, s_t, Ne_t, i = tup
+    datum, s_t, i = tup
     assert beta0.log_p.ndim == 2
     assert beta0.log_p.shape[1] == 2
-    beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne_t), beta0)
+    beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne), beta0)
     # beta1 = eqx.error_if(beta1, cs.any(), msg="spikes >= 1")
     # now process the observation
     n, d = datum.obs
@@ -437,7 +475,7 @@ def _forward_helper(accum, tup):
 
 
 # @partial(jit, static_argnums=3)
-def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
+def forward(s: Selection, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
     """
     Run the forward algorithm for the BMwS model.
 
@@ -450,14 +488,9 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
     Returns:
         Tuple (betas, lls). betas [T, K, M] are the filtering distributions, and lls are the conditional likelihoods.
     """
-    assert Ne.ndim == 2
-    T, K = Ne.shape
-    assert s.shape == Ne.shape == (T, K)
-
     ninf = jnp.full([data.K, 2], -jnp.inf)
     beta0 = SpikedBeta(ninf, beta)
-    s_t = s[data.t]
-    Ne_t = Ne[data.t]
+    s_t = s(data.t)
     init = (beta0, 0.0, data.t[0], jax.random.PRNGKey(1))
 
     if os.environ.get("BMWS_UNROLL_FORWARD"):
@@ -474,9 +507,9 @@ def forward(s: jnp.ndarray, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
             ll = state[1]
     else:
         (_, ll, _, _), betas = lax.scan(
-            _forward_helper,
+            partial(_forward_helper, Ne=Ne),
             init,
-            (data, s_t, Ne_t, jnp.arange(len(Ne_t))),
+            (data, s_t, jnp.arange(len(s_t))),
         )
 
     return betas, ll

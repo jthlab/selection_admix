@@ -22,7 +22,7 @@ dependencies = [
     "matplotlib<4,>=3",
     "numpy>=1.20",
     "scipy>=1.12",
-    "jax[cuda12]==0.5.1",
+    "jax[cuda12]>=0.5",
     "jaxopt>=0.8.3",
     "loguru>=0.7.2",
     "platformdirs>=4.2.2",
@@ -31,6 +31,7 @@ dependencies = [
     "notebook>=7",
     "statsmodels>=0.14.4",
     "equinox>=0.11.12",
+    "interpax>=0.3.7",
 ]
 requires-python = ">=3.12"
 readme = "README.md"

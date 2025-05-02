@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from bmws.estimate import estimate, empirical_bayes, sample_paths
+from bmws.estimate import estimate, empirical_bayes, sample_paths, Selection
 
 import jax
 
@@ -93,12 +93,10 @@ def read_data(pop):
 
     return datasets, snps
 
-
 def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
     M = 100
-    Ne = np.full([data.T, data.K], 1e4)
-    Ne_fit = Ne
-    s = (0.0, np.zeros([data.T, data.K]))
+    Ne = 1e4
+    s = Selection(T=data.T, s=np.zeros([20, data.K]))
     ab = np.ones([2, data.K]) + 1e-4
     estimate_kwargs = {"alpha": alpha, "beta": beta, "gamma": gamma}
 
@@ -106,9 +104,8 @@ def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
     print("alpha=" + str(alpha) + "; beta=" + str(beta))
     for i in range(em_iterations):
         print("Iteration " + str(i))
-        print("estimate_kwargs " + str(estimate_kwargs))
         ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
-        s = estimate(s0=s, data=data, Ne=Ne_fit, prior=prior, **estimate_kwargs)
+        s = estimate(s0=s, data=data, Ne=Ne, prior=prior, **estimate_kwargs)
     return s, prior, Ne
 
 

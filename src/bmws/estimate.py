@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from functools import partial
+from functools import partial, singledispatch
 from typing import Union
 
 import equinox as eqx
+import interpax
 import jax
 import jaxopt
 import numpy as np
@@ -18,7 +19,6 @@ from scipy.optimize import minimize
 
 from bmws.betamix import (
     BetaMixture,
-    SpikedBeta,
     _construct_prior,
     _transition,
     forward,
@@ -26,6 +26,20 @@ from bmws.betamix import (
     safe_lae,
 )
 from bmws.data import Dataset
+
+
+@singledispatch
+def _smoothness(s: jnp.ndarray):
+    return jnp.sum(jnp.diff(s) ** 2)
+
+
+@_smoothness.register
+def _(s: Selection):
+    # s represents a spline
+    # integrate (f')^2
+    t = jnp.linspace(0, s.T, 1000)
+    df = s(t, derivative=1)
+    return jnp.trapezoid(df**2, t)
 
 
 def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
@@ -40,18 +54,12 @@ def _prox_nuclear_norm(X, alpha=1.0, scaling=1.0):
 
 def _obj(s, Ne, data: Dataset, prior: BetaMixture, alpha, beta):
     # s: ((), [T, K])
-    s_bar, ds = s
-    assert ds.shape == Ne.shape
-    ll = loglik(s_bar + ds, Ne, data, prior)
-    temporal_diff = jnp.sum(jnp.diff(ds, axis=0) ** 2)
-    pairwise_diff = jnp.sum(ds**2)
+    ll = loglik(s, Ne, data, prior)
+    temporal_diff = vmap(_smoothness, in_axes=1)(s).sum()
+    pairwise_diff = jnp.sum((s.s[:, None, :] - s.s[:, :, None]) ** 2)
     ret = -ll + alpha * temporal_diff + beta * pairwise_diff
-    # _, ret = id_print((s.mean(axis=0), ret), what="s/ret")
     jax.debug.print("ll:{} td:{} pd:{}", ll, temporal_diff, pairwise_diff)
     return ret
-
-
-obj = jit(value_and_grad(_obj))
 
 
 @jnp.vectorize
@@ -71,6 +79,34 @@ def _interp(a, b, M) -> BetaMixture:
     )
 
 
+def _eb_loss(ab, s, Ne, data, alpha, beta, M):
+    # ab: [2, K]
+    a, b = ab
+    prior = _interp(a, b, M)
+    # prior = jax.vmap(lambda _: prior)(jnp.arange(data.K))
+    ret = _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
+    jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
+    return ret
+
+
+def _p_prime(p, s):
+    return (1.0 + s / 2.0) * p / (1.0 + s / 2.0 * p)
+
+
+def _s_loss(s0, p0, p1, vp, Ne, data, alpha, beta, prior):
+    T = len(p0) + 1
+    xq = jnp.arange(T)
+    M = len(s0)
+    x = jnp.linspace(0, T, M)
+    s = interpax.interp1d(xq, x, s0, extrap=True)
+    ep = _p_prime(s=s, p=p0)
+    weights = 1 / (1e-4 + vp)
+    score = jnp.sum((p1 - ep) ** 2)
+    temporal_diff = jnp.sum(jnp.diff(s, axis=0) ** 2)
+    pairwise_diff = jnp.sum((s[:, None, :] - s[:, :, None]) ** 2)
+    return score + alpha * temporal_diff + beta * pairwise_diff
+
+
 @dataclass
 class _Optimizer:
     # cache optimizer objects to prevent recompiles
@@ -78,24 +114,17 @@ class _Optimizer:
     M: int
 
     def __post_init__(self):
-        def _eb_loss(ab, s, Ne, data, alpha, beta):
-            # ab: [2, K]
-            a, b = ab
-            prior = _interp(a, b, self.M)
-            # prior = jax.vmap(lambda _: prior)(jnp.arange(data.K))
-            ret = _obj(s, Ne, data, prior, alpha=alpha, beta=beta)
-            jax.debug.print("eb_loss: ab:{} ret:{}", ab, ret)
-            return ret
-
-        opt = jaxopt.LBFGSB(fun=_eb_loss, maxiter=50, maxls=10)
+        opt = jaxopt.LBFGSB(fun=partial(_eb_loss, M=self.M), maxiter=1)
         self._eb_opt = jit(opt.run)
 
         opt = jaxopt.LBFGSB(fun=_obj, maxiter=50, maxls=10)
         self._ll_opt = jit(opt.run)
 
+        opt = jaxopt.LBFGSB(fun=_s_loss)
+        self._s_opt = opt.run
+
     def run_eb(self, ab0, s, Ne, data, alpha, beta):
         # prevent weak_type so that compiles only happen once
-        print(ab0, s, Ne, alpha, beta)
         ab0, s, Ne, alpha, beta = jax.tree.map(
             lambda a: jnp.asarray(a, dtype=jnp.float64), (ab0, s, Ne, alpha, beta)
         )
@@ -105,7 +134,7 @@ class _Optimizer:
             obs=jnp.asarray(data.obs, dtype=jnp.int64),
         )
         lb = jnp.full_like(ab0, 1.0 + 1e-4)
-        ub = jnp.full_like(ab0, 100.0)
+        ub = jnp.full_like(ab0, 1000.0)
         bounds = (lb, ub)
         res = self._eb_opt(
             # ab0, bounds=bounds, s=s, Ne=Ne, data=data, alpha=alpha, beta=beta
@@ -135,8 +164,17 @@ class _Optimizer:
             obs=jnp.asarray(data.obs, dtype=jnp.int64),
         )
         bounds = [jax.tree.map(lambda a: jnp.full_like(a, x), s0) for x in (-0.1, 0.1)]
-        res = self._ll_opt(
+
+        paths = sample_paths(s0, Ne, data, prior, k=100)
+        # p' = p + p(1-p)(s/2) => s = 2(p'-p) / [p(1-p)]
+        p0 = paths[..., 1:].mean(0).T
+        p1 = paths[..., :-1].mean(0).T
+        vp0 = paths[..., 1:].var(0).T
+        res = self._s_opt(
             s0,
+            p0=p0,
+            p1=p1,
+            vp=vp0,
             bounds=bounds,
             alpha=alpha,
             beta=beta,
@@ -161,26 +199,6 @@ def empirical_bayes(
     "maximize marginal likelihood w/r/t prior hyperparameters"
     opt = _Optimizer.factory(M)
     return opt.run_eb(ab0, s, Ne, data, alpha=alpha, beta=beta)
-
-
-@partial(jit, static_argnums=5)
-def jittable_estimate(obs, Ne, lam, prior, learning_rate=0.1, num_steps=100):
-    opt_init, opt_update, get_params = adagrad(learning_rate)
-    params = jnp.zeros(len(Ne))
-    opt_state = opt_init(params)
-
-    @value_and_grad
-    def loss_fn(s):
-        return _obj(s, Ne, obs, prior, lam)
-
-    def step(i, opt_state):
-        value, grads = loss_fn(get_params(opt_state))
-        opt_state = opt_update(i, grads, opt_state)
-        return opt_state
-
-    opt_state = lax.fori_loop(0, num_steps, step, opt_state)
-
-    return get_params(opt_state)
 
 
 def estimate(
