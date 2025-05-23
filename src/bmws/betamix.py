@@ -1,8 +1,10 @@
 "beta mixture with spikes model"
+
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import NamedTuple, Union
+from typing import NamedTuple, Union, Callable, Any
+import operator
 
 import equinox as eqx
 import interpax
@@ -10,10 +12,113 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import jit, lax, vmap
-from jax.scipy.special import betaln, digamma, gammaln, logsumexp, xlog1py, xlogy
+import jaxopt
+from jax.nn import sigmoid
+from jax.scipy.special import betaln, digamma, gammaln, logsumexp, xlog1py, xlogy, logit
+from jax.scipy.stats import binom
+from jax.experimental.sparse import BCOO
 from loguru import logger
+import optax
+import optimistix as optx
+import wrapt
+
+import flowjax.flows
+import flowjax.bijections
+from flowjax.distributions import AbstractDistribution, Normal, Transformed
+import gnuplotlib as gp
 
 from bmws.data import Dataset
+from .flsa import flsa
+from .util import tree_stack, tree_unstack
+import wadler_lindig as wl
+
+
+Ne = 10_000
+NUM_SAMPLES = 20_000
+
+def _debug_print(fmtstr, *args):
+    def pp(*args):
+        print(fmtstr.format(*[wl.pformat(a, short_arrays=False) for a in args]))
+
+    jax.debug.callback(pp, *args)
+
+
+def cond(pred, f1, f2, *args, **kwargs):
+    """
+    A conditional function that takes a predicate and two functions.
+    If the predicate is true, it calls f1 with the given arguments,
+    otherwise it calls f2 with the same arguments.
+    """
+    if pred:
+        return f1(*args, **kwargs)
+    else:
+        return f2(*args, **kwargs)
+
+
+def scan(f, init, seq, reverse=False):
+    """
+    A scan function that applies a function f to an initial value and a sequence.
+    If reverse is True, it applies the function in reverse order.
+    """
+    if reverse:
+        seq = jax.tree_util.tree_map(lambda x: x[::-1], seq)
+    accum = init
+    ret = []
+    batch_size = jax.tree.reduce(lambda x, y: x, jax.tree.map(lambda x: x.shape[0], seq))
+    for i in range(batch_size):
+        xi = jax.tree.map(lambda x: x[i], seq)
+        accum, res = f(accum, xi)
+        ret.append(res)
+    ret = tree_stack(ret)
+    if reverse:
+        ret = jax.tree_util.tree_map(lambda x: x[::-1], ret)
+    return accum, ret
+
+if __debug__:
+    print("Debug mode enabled. Using Python loops for scan and cond.")
+    OPT_KW = dict(verbose=frozenset({"step_size", "loss"}))
+else:
+    scan = lax.scan
+    cond = lax.cond
+OPT_KW = dict(verbose=frozenset())
+
+def sample_one_categorical(key, *, logits):
+    'generate one sample from a categorical distribution with streaming'
+    def body(accum, i):
+        a, b, key = accum
+        key, subkey = jax.random.split(key)
+        g = jax.random.gumbel(subkey)
+        k = g + logits[i]
+        b = jnp.where(k > a, i, b)
+        a = jnp.maximum(k, a)
+        return (a, b, key), None
+
+    (_, i_star, _) = lax.scan(body, (-jnp.inf, -1, key), jnp.arange(logits.shape[0]))[0]
+    return i_star
+
+
+def binom_logpmf(y: int, n: int, *, logit_p: float) -> float:
+    """Log-likelihood of Binomial(y | n, sigmoid(logit_p)) without computing sigmoid."""
+    log_binom_coeff = -betaln(n - y + 1, y + 1) - jnp.log(n + 1)
+    return log_binom_coeff + y * logit_p - n * jnp.logaddexp(0.0, logit_p)
+
+
+def random_binomial_large_N(key, N, p, no_boundary=True):
+    assert N >= 1e4
+    key0, key1, key2 = jax.random.split(key, 3)
+    mu = N * p
+    sigma2 = N * p * (1 - p)
+    x = mu + jnp.sqrt(sigma2) * jax.random.normal(key0, shape=p.shape)
+    y_norm = x.round(0).astype(int)
+    y_pois0 = jax.random.poisson(key1, N * p, shape=p.shape)
+    y_pois1 = jax.random.poisson(key2, N * (1 - p), shape=p.shape)
+    ret = jnp.select(
+        [N * p < 10., N * (1 - p) < 10.],
+        [y_pois0, N - y_pois1],
+        y_norm
+    )
+    ret = jnp.where(no_boundary, ret.clip(1, N - 1), ret)
+    return ret
 
 
 @jax.tree_util.register_dataclass
@@ -22,505 +127,476 @@ class Selection:
     T: float = field(metadata=dict(static=True))
     s: jnp.ndarray
 
-    def __call__(self, xq, derivative=0):
+    @property
+    def t(self):
+        assert self.s.ndim == 2
         M = len(self.s)
-        t = jnp.linspace(0, self.T, M)
-        return interpax.interp1d(xq, t, self.s, extrap=True)
+        return jnp.linspace(0, self.T, M)
+
+    def __call__(self, xq, derivative=0):
+        assert xq.ndim == 1
+        t = self.t
+
+        def f(si):
+            return interpax.interp1d(xq, t, si, extrap=True)
+
+        return vmap(f, in_axes=1, out_axes=1)(self.s)
+        # return vmap(interpax.interp1d, in_axes=(None, 0, 1), out_axes=1)(t, xq, self.s)
 
 
-def log1mexp(x):
-    # log(1 - exp(x)), x < 0
-    # x = eqx.error_if(x, x >= 0, msg="x >= 0")
-    return jnp.where(x < -0.693, jnp.log1p(-jnp.exp(x)), jnp.log(-jnp.expm1(x)))
+    def roughness(self):
+        x = jnp.linspace(0, self.T, self.s.shape[0])
+        ds2 = self(x, derivative=1)
+        return jnp.trapezoid(ds2 ** 2, x, axis=0).sum()
 
-
-def safe_lae(x, y):
-    x_safe = jnp.where(jnp.isneginf(x), 1.0, x)
-    y_safe = jnp.where(jnp.isneginf(y), 1.0, y)
-    return jnp.select(
-        [
-            jnp.isneginf(x) & jnp.isneginf(y),
-            jnp.isneginf(x) & ~jnp.isneginf(y),
-            ~jnp.isneginf(x) & jnp.isneginf(y),
-        ],
-        [-jnp.inf, y, x],
-        jnp.logaddexp(x_safe, y_safe),
-    )
-
-
-def safe_logsumexp(v):
-    all_neginf = jnp.isneginf(v).all()
-    v_safe = jnp.where(all_neginf, 0.0, v)
-    return jnp.where(all_neginf, -jnp.inf, logsumexp(v_safe))
-
-
-def _scan(f, init, xs, length=None):
-    if xs is None:
-        xs = [None] * length
-    carry = init
-    ys = []
-    for x in zip(*xs):
-        carry, y = f(carry, x)
-        ys.append(y)
-    return carry, np.stack(ys)
-
-
-def _logbinom(n: int, k: int) -> float:
-    """Compute the natural logarithm of the binomial coefficient.
-
-    Args:
-        n (int): The number of trials.
-        k (int): The number of successes.
-
-    Returns:
-        float: The natural logarithm of the binomial coefficient.
-    """
-    return jnp.where(
-        n > 0,
-        -jnp.log(n + 1) - betaln(k + 1, n - k + 1),
-        jnp.where(k == 0, 0.0, -jnp.inf),
-    )
-
-
-def _wf_trans(s, N, a, b):
-    # X` = Y / N where:
-    #
-    #     Y ~ Binomial(N, p') | 0 < Y < N ,
-    #     p' = p + p(1-p)(s/2),
-    #     p ~ Beta(a,b)
-    #
-    # E(Y | 0 < Y < N) = N(p' - p'^n)
-    # EX' = Ep'(1-p'^{N-1})
-    mean = (a * (2 + 2 * a + b * (2 + s))) / (2.0 * (a + b) * (1 + a + b))
-    # EX = 0.5 * (
-    #     (a * (2 + 2 * a + b * (2 + s))) / (a + b) / (1 + a + b)
-    #     - (
-    #         (2 * (a + b + N) + b * N * s)
-    #         * jnp.exp(
-    #             gammaln(a + b) + gammaln(a + N) - gammaln(a) - gammaln(1 + a + b + N)
-    #         )
-    #     )
-    # )
-    # var(X') = E var(X'|X) + var E(X' | X) = E p'(1-p')/N + var(x + x(1-x)*(s/2))
-
-    # E(X'|X) = p'(1-p'^(N-1))
-    # E p'(1-p') / N
-    Evar = (
-        (a * b * (4 - a * (-2 + s) + b * (2 + s)))
-        / (2.0 * (a + b) * (1 + a + b) * (2 + a + b))
-        / N
-    )
-    varE = (
-        a
-        * b
-        * (
-            4 * (1 + a + b) * (2 + a + b) * (3 + a + b)
-            - 4 * (a - b) * (1 + a + b) * (3 + a + b) * s
-            + (a + a**3 - a**2 * (-2 + b) + b * (1 + b) ** 2 - a * b * (2 + b)) * s**2
-        )
-    ) / (4.0 * (a + b) ** 2 * (1 + a + b) ** 2 * (2 + a + b) * (3 + a + b))
-    var = Evar + varE
-    return _inv_beta(mean, var)
-
-
-def _inv_beta(mean, var):
-    u = mean * (1 - mean) / var - 1
-    a = mean * u
-    b = (1 - mean) * u
-    return a, b
-
-
-class BetaMixture(NamedTuple):
-    """Mixture of beta pdfs:
-
-    M = len(c) - 1
-    p(x) = sum_{i=0}^{M} c[i] x^(a[i] - 1) (1-x)^(b[i] - 1) / beta(a[i], b[i])
-    """
-
-    a: np.ndarray
-    b: np.ndarray
-    log_c: np.ndarray
-
-    def top_k(self, k):
-        """Return the top k components of the mixture"""
-        log_c, i = lax.top_k(self.log_c, k)
-        log_c -= logsumexp(log_c)
-        return BetaMixture(self.a[i], self.b[i], log_c)
-
-    def sample(self, key: jax.random.PRNGKey):
-        keys = jax.random.split(key, 3)
-        i = jax.random.categorical(keys[0], self.log_c)
-        return jax.random.beta(keys[1], self.a[i], self.b[i])
-
-    @property
-    def c(self):
-        return jnp.exp(self.log_c)
+    def __call__(self, xq, derivative=0):
+        assert self.s.ndim == 2
+        assert xq.ndim == 1
+        assert derivative == 0
+        return self.s[xq]
 
     @classmethod
-    def uniform(cls, M) -> "BetaMixture":
-        return cls.interpolate(lambda x: 0.0, M, norm=True, log_f=True)
+    def default(cls, T, K):
+        s = np.zeros((T, K))
+        return cls(T=T, s=s)
 
-    @classmethod
-    def interpolate(cls, f, M, norm=False, log_f=False) -> "BetaMixture":
-        # bernstein polynomial basis:
-        # sum_{i=0}^(M) f(i/M) binom(M,i) x^i (1-x)^(M-i)
-        #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) x^(i-1) (1-x)^(M-i+2-1)
-        #   = sum_{i=1}^(M+1) f((i-1)/M) binom(M,i-1) * beta(i,M-i+2) x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
-        #   = sum_{i=1}^(M+1) f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
-        #   we assume that f(0) = f(1) = 0 hence
-        #   = sum_{i=2}^M f((i-1)/M) (1+M)^-1 x^(i-1) (1-x)^(M-i+2-1) / beta(i, M-i+2)
-        N = M + 1
-        i = jnp.arange(2, N + 1, dtype=float)  # N - 1 => M + 1
-        if log_f:
-            log_c = vmap(f)((i - 1) / N) - jnp.log1p(N)
-        else:
-            c = vmap(f)((i - 1) / N) / (1 + N)
-            c0 = jnp.isclose(c, 0.0)  # work around nans in gradients
-            c_safe = jnp.where(c0, 1.0, c)
-            log_c = jnp.where(c0, -jnp.inf, jnp.log(c_safe))
-        if norm:
-            log_c -= logsumexp(log_c)
-        return cls(a=i, b=N - i + 2, log_c=log_c)
+class EarlyStop(optx.AbstractMinimiser):
+    solver: optx.AbstractMinimiser
+    validation_func: Callable[[Any, Any], float]
+    patience: int = 100
 
-    @property
-    def M(self):
-        return self.log_c.shape[-1]
+    def init(self, *args, **kwargs):
+        state = self.solver.init(*args, **kwargs)
+        # cast to jnp.array because eqx.is_array is used inside the stack to partition later on
+        return dict(base_state=state, best_loss=jnp.array(jnp.inf), patience=jnp.array(self.patience))
 
-    @property
-    def moments(self):
-        "return a matrix A such that A @ self.c = [EX, EX^2] where X ~ self"
-        a = self.a
-        b = self.b
-        EX = a / (a + b)  # EX
-        EX2 = a * (a + 1) / (a + b) / (1 + a + b)  # EX2
-        return jnp.array([EX, EX2])
+    def step(self, fn, y, args, options, state, tags):
+        y1, state['base_state'], aux = self.solver.step(fn, y, args, options, state['base_state'], tags)
+        val_loss = self.validation_func(y, args)
+        better = val_loss < state['best_loss']
+        state['best_loss'] = jnp.where(better, val_loss, state['best_loss'])
+        state['patience'] = jnp.where(better, self.patience, state['patience'] - 1)
+        return y1, state, aux
+
+    def terminate(self, fn, y, args, options, state, tags):
+        stop, result = self.solver.terminate(fn, y, args, options, state['base_state'], tags)
+        early_stop = state['patience'] <= 0
+        stop = jnp.where(early_stop, True, stop)
+        result = optx.RESULTS.where(early_stop, optx.RESULTS.successful, result)
+        return stop, result
+
+    def postprocess(self, fn, y, aux, args, options, state, tags, result):
+        return self.solver.postprocess(fn, y, aux, args, options, state['base_state'], tags, result)
 
     @property
-    def mean(self):
-        return jnp.sum(self.moments[0] * self.c, -1)
+    def atol(self):
+        return self.solver.atol
 
     @property
-    def var(self):
-        return jnp.sum(self.moments[1] * self.c, -1) - self.mean**2
-
-    def __call__(self, x, log=False):
-        ret = logsumexp(
-            self.log_c
-            + xlogy(self.a - 1, x)
-            + xlog1py(self.b - 1, -x)
-            - betaln(self.a, self.b)
-        )
-        if not log:
-            ret = jnp.exp(ret)
-        return ret
-
-    def plot(self, K=100, ax=None) -> None:
-        if ax is None:
-            import matplotlib.pyplot as plt
-
-            ax = plt.gca()
-
-        x = np.linspace(0.0, 1.0, K)
-        y = np.vectorize(self)(x)
-        ax.plot(x, y)
-
-
-class SpikedBeta(NamedTuple):
-    log_p: jnp.ndarray  # spikes at 0 and 1
-    f_x: BetaMixture  # abs. continuous component
-
-    @classmethod
-    def safe_init(cls, log_p, f_x):
-        "ensure that the spikes sum up to strictly less than 1 and the mixture sums to one"
-        log_p = jnp.clip(log_p, -jnp.inf, -1e-8)
-        # if logaddexp(log_p) >= 0 then we want to multiply p by .99999 / p.sum().
-        # equivalently, we want to add log(.99999 / p.sum()) = log(1-1e-8) - log_ps
-        log_ps = safe_lae(log_p[0], log_p[1])
-        safe_log_p = jnp.where(jnp.isneginf(log_ps), 1.0, log_p)
-        safe_log_ps = jnp.where(jnp.isneginf(log_ps), 1.0, log_ps)
-        log_p = jnp.where(
-            log_ps >= 0,
-            safe_log_p + jnp.log1p(-1e-8) - safe_log_ps,
-            log_p,
-        )
-        # adjust the continuous weights to be 1 - lae(log_p)
-        log_ps = safe_lae(log_p[0], log_p[1])
-        # log_ps = eqx.error_if(log_ps, log_ps >= jnp.log1p(-1e-8), msg="log_ps >= 0")
-        # logsumexp(f_x.log_c) = log1p(-exp(log_ps))
-        log_c = f_x.log_c - logsumexp(f_x.log_c) + log1mexp(log_ps)
-        return cls(log_p, f_x._replace(log_c=log_c))
-
-    def sample(self, key: jax.random.PRNGKey, spikes: bool = None):
-        if spikes is None:
-            spikes = [True, True]
-        keys = jax.random.split(key, 2)
-        f = self.f_x.sample(keys[0])
-        a = jnp.array([0.0, 1.0, f])
-        p_spike = jnp.exp(self.log_p)
-        p_spike *= jnp.array(spikes)
-        p = jnp.append(p_spike, 1 - p_spike.sum())
-        p /= p.sum()
-        return jax.random.choice(keys[1], a, p=p)
-
-    def __call__(self, x, log: bool = False):
-        ret = jnp.select(
-            [jnp.isclose(x, 0.0), jnp.isclose(x, 1.0)],
-            [self.log_p[0], self.log_p[1]],
-            self.log_r + self.f_x(x, log=True),
-        )
-        if not log:
-            ret = jnp.exp(ret)
-        return ret
-
-    # def mean(self):
-    #     p = self.p
-    #     return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[0]
+    def rtol(self):
+        return self.solver.rtol
 
     @property
-    def mean(self):
-        p = jnp.exp(self.log_p)
-        return p @ jnp.array([0.0, 1.0]) + (1 - p.sum(-1)) * self.f_x.mean
+    def norm(self):
+        return self.solver.norm
+
+
+class KDEDistribution(NamedTuple):
+    data: Any
+    weights: Any
+
+    @staticmethod
+    def _bw(kde):
+        samples = kde.dataset.T
+        weights = kde.weights
+
+        if weights is None:
+            weights = jnp.ones(len(samples)) / len(samples)
+
+        # break the samples, weights into train, test
+        T = int(len(samples) * 0.8)
+        s_train, s_test = jnp.array_split(samples, [T])
+        w_train, w_test = jnp.array_split(weights, [T])
+        w_train /= jnp.sum(w_train)
+        w_test /= jnp.sum(w_test)
+
+        def f(h):
+            kde_train = jax.scipy.stats.gaussian_kde(s_train.T, weights=w_train, bw_method=h)
+            return -jnp.average(kde_train.logpdf(s_test.T), weights=w_test)
+        
+        # find the optimal bandwidth
+        hs = jnp.geomspace(0.01, 0.5, 20)
+        lls = lax.map(f, hs)
+        h_star = hs[lls.argmin()]
+
+        if __debug__:
+            jax.debug.print("h_star:{}", h_star, ordered=True)
+
+        return h_star
 
     @property
-    def EX2(self):
-        p = jnp.exp(self.log_p)
-        return p @ jnp.array([0.0, 1.0]) + (1 - p.sum()) * self.f_x.moments[1]
+    def D(self):
+        return self.data.shape[1]
 
     @property
-    def var(self):
-        return self.EX2 - self.mean**2
+    def _kde(self):
+        return jax.scipy.stats.gaussian_kde(self.data.T, weights=self.weights, bw_method=self._bw)
 
-    @property
-    def log_r(self):
-        lp = safe_lae(self.log_p[..., 0], self.log_p[..., 1]).clip(-jnp.inf, -1e-8)
-        return log1mexp(lp)
+    def refit(self, samples, weights=None):
+        assert samples.ndim == 2
 
-    @property
-    def r(self):
-        return jnp.exp(self.log_r)
+        if weights is None:
+            weights = jnp.ones(len(samples)) / len(samples)
 
-    @property
-    def M(self):
-        "The number of mixture components"
-        return self.f_x.M
+        return self.__class__(samples, weights)
 
-    def plot(self):
-        import matplotlib.pyplot as plt
+    def log_pdf(self, x):
+        return self._kde.logpdf(x)
 
-        self.f_x.plot()
-        plt.bar(0.0, self.p0, 0.05, alpha=0.2, color="tab:red")
-        plt.bar(1.0, self.p1, 0.05, alpha=0.2, color="tab:red")
+    def sample(self, key, n_samples=1):
+        return self._kde.resample(key, shape=(n_samples,)).T
 
 
-@jit
-def _transition(f: SpikedBeta, s: jnp.ndarray, Ne: jnp.ndarray) -> SpikedBeta:
-    """Given a prior distribution on population allele frequency, compute posterior after
-    one round of WF mating."""
+# def logit(x):
 
-    @vmap
-    def lp(fi, si):
-        # compute update spike probabilities and wf transition
-        # mu = fi.mean
-        # sigma2 = fi.var
-        # a0, b0 = _inv_beta(mu, sigma2)
-        # a1, b1 = _wf_trans(si, Nei, a0, b0)
-        # D = jnp.sqrt(
-        #     jnp.sum((fi.f_x.a - a1) ** 2 + (fi.f_x.b - b1) ** 2))
-        #
-        # log_p = -D
-        # log_p -= logsumexp(log_p)
-        # log_c1 = fi.f_x.log_c + log_p
-        # log_c1 -= logsumexp(log_p)
-        # log_c1 = eqx.error_if(log_c1, jnp.isnan(log_c1), "log_c1 nan")
+# @jax.tree_util.register_dataclass
+# @dataclass
+# class Selection:
+#     T: float = field(metadata=dict(static=True))
+#     s: jnp.ndarray
+# 
+#     def __call__(self, xq, derivative=0):
+#         assert self.s.ndim == 2
+#         assert xq.ndim == 1
+#         return self.s[xq]
+# 
+# 
+#     def smoothness(self):
+#         return jnp.sum(jnp.diff(self.s, 0) ** 2)
+# 
+#     @classmethod
+#     def default(cls, T, K):
+#         s = np.zeros((T, K))
+#         return cls(T=T, s=s)
 
-        # jax.debug.print("mu:{} sigma2:{} a0:{} a1:{} D:{} log_c1:{}", mu, sigma2, a0, a1, D, log_c1, ordered=True)
-        # return fi._replace(
-        #     f_x=fi.f_x._replace(log_c=log_c1)
+
+def p_prime(s, p):
+    return (1 + s / 2) * p / (1 + s / 2 * p)
+
+def logit_p_prime(s, *, logit_p):
+    return logit_p + jnp.log1p(s / 2)
+
+def filter_inexact(pytree):
+    return eqx.filter(pytree, eqx.is_inexact_array)
+
+
+class FlowHMM:
+    def __init__(self, D, key=None):
+        if key is None:
+            key = jax.random.key(0)
+        self._key = key
+        self._D = D
+        data = jax.random.beta(key, a=1., b=100., shape=(NUM_SAMPLES, D))
+        self.prior = KDEDistribution(data, weights=jnp.ones(NUM_SAMPLES) / NUM_SAMPLES)
+        # self.prior = flowjax.flows.masked_autoregressive_flow(
+        #     key,
+        #     base_dist=flowjax.distributions.Normal(loc=jnp.zeros(D)),
+        #     flow_layers=3,
+        #     nn_width=128,
+        #     nn_activation=jax.nn.silu,
         # )
-        log_p, (a, b, log_c) = fi
-        assert log_p.shape == (2,)
-        log_r = fi.log_r
-        x = jnp.array([0, Ne])[:, None]  # [2, 1]
-        # probability mass for fixation. p(af=0) = p0 + (1-p0-p1) * \int_0^1 f(x) (1-x)^n, and similarly for p1
-        log_p_c = log_r + logsumexp(
-            log_c + betaln(x + a, Ne - x + b) - betaln(a, b), axis=1
-        )  # [2] probability of loss or fixation in continuous component
-        log_p1 = safe_lae(log_p, log_p_c)
-        a1, b1 = _wf_trans(si, Ne, a, b)
-        EX0 = jnp.isclose(b1, -1.0)
-        EX1 = jnp.isclose(a1, -1.0)
-        log_p2_0 = safe_lae(log_p1[0], safe_logsumexp(jnp.where(EX0, log_c, -jnp.inf)))
-        log_p2_1 = safe_lae(log_p1[1], safe_logsumexp(jnp.where(EX1, log_c, -jnp.inf)))
-        log_p2 = jnp.array([log_p2_0, log_p2_1])
-        log_c = jnp.where(EX0 | EX1, -jnp.inf, log_c)
-        log_c1 = fi.f_x.log_c
-        return SpikedBeta.safe_init(log_p2, BetaMixture(a1, b1, log_c))
+        # sig = flowjax.bijections.Sigmoid(shape=(D,))
+        # self.model = Transformed(fl, sig)
+        self.model_nc = eqx.filter(self.prior, eqx.is_inexact_array, inverse=True)
 
-    assert f.log_p.ndim == 2
-    assert f.log_p.shape[1] == 2
-    ret = lp(f, s)
-    return ret
+    def get_key(self):
+        self._key, ret = jax.random.split(self._key)
+        return ret
+
+    def _fit_c(self, model_c, data, weights=None):
+        if weights is None:
+            weights = jnp.ones(len(data)) / len(data)
+
+        return self.prior.refit(data, weights=weights)
+
+        # split data into train and test
+        s = int(len(data) * 0.8)
+        train, test = jnp.array_split(data, [s])
+        w_train, w_test = jnp.array_split(weights, [s])
+        w_train = w_train / jnp.sum(w_train)
+        w_test = w_test / jnp.sum(w_test)
+
+        # objective
+        def loss(model_c, args):
+            data, weights, lam = args
+            model = self.combine(model_c)
+            with jax.debug_infs(True):
+                lp = model.log_prob(data)
+            l1 = -jnp.average(lp, weights=weights)
+            l2 = jax.tree.reduce(operator.add, jax.tree.map(lambda x: jnp.sum(x ** 2), model_c))
+            ret = l1 + lam * l2
+            return jnp.where(~jnp.isfinite(ret), jnp.inf, ret)
+
+        def val_loss(model_c, args):
+            return loss(model_c, (test, w_test, 0.0))
+
+        opt = optx.OptaxMinimiser(optax.adam(1e-3), rtol=1e-4, atol=1e-4, **OPT_KW)
+        opt = EarlyStop(opt, val_loss, patience=100)
+
+        with jax.debug_nans(True):
+            soln = optx.minimise(loss, opt, model_c, args=(train, w_train, 1e-4), max_steps=None)
+
+        if __debug__:
+            jax.debug.print("soln stats: {}", soln.stats)
+        return soln.value
+
+    def _fit(self, model, data, weights=None):
+        return self.combine(self._fit_c(self.filter(model), data, weights=weights))
+
+    def fit_prior(self, ab):
+        assert ab.shape == (2, self._D)
+        key0, key1, key2 = jax.random.split(self.get_key(), 3)
+        samples = logit(jax.random.beta(key0, *ab, shape=(NUM_SAMPLES, self._D)))
+        self.prior = self.prior.refit(samples)
+
+    def combine(self, model_c):
+        return eqx.combine(model_c, self.model_nc)
+
+    def filter(self, model):
+        return eqx.filter(model, eqx.is_inexact_array)
+
+    def transition(self, fc: AbstractDistribution, s: jnp.ndarray, key) -> AbstractDistribution:
+        """Given a prior distribution on population allele frequency, compute posterior after
+        one round of WF mating."""
+        f = self.combine(fc)
+        key, subkey = jax.random.split(key)
+        logit_p = f.sample(subkey, NUM_SAMPLES)
+        p = sigmoid(logit_p)
+        pp = p_prime(s[None, :], p)
+        n = random_binomial_large_N(key, 2 * Ne, pp)
+        x = n / (2 * Ne)
+        y = logit(x).clip(-1e2, 1e2)
+        fr = self._fit(f, y)
+        ret = self.filter(fr)
+        return ret
 
 
-def _binom_sampling(n, d, f: SpikedBeta):
-    log_p, (a, b, log_c) = f
-    assert log_p.shape == (2,)
-    log_r = f.log_r
-    a1 = a + d
-    b1 = b + n - d
-    # probability of the data given the absolutely continuous component
-    log_p_data_comp_cont = jnp.where(
-        jnp.isneginf(log_c),
-        -jnp.inf,
-        # beta binomial pmf
-        log_c + betaln(a1, b1) - betaln(a, b) + _logbinom(n, d),
-    )
-    log_p_data_cont = safe_logsumexp(log_p_data_comp_cont)
-    # probability of the data given the spike components
-    log_p_data_spike = jnp.where((n > 0) & (d == jnp.array([0, n])), 0.0, -jnp.inf)
-    # overall probability of the data
-    ll = safe_lae(log_r + log_p_data_cont, safe_logsumexp(log_p + log_p_data_spike))
-    # probability of spikes given data: p(spike | data) =
-    # p(data | spike) p(spike) / p(data)
-    log_p1 = log_p_data_spike + log_p - ll
-    # probability of mixing components given data:
-    # p(comp | data, cont) = p(data | comp, cont) * p(comp | cont) / p(data | cont)
-    log_c1 = log_p_data_comp_cont - log_p_data_cont
-    # posterior after binomial sampling --
-    # some_c1 might be -inf for some components that have extremely low likelihood
-    beta = SpikedBeta.safe_init(log_p1, BetaMixture(a1, b1, log_c1))
-    return beta, ll
+    def binom_sampling(self, fc, n: int, d: int, theta: jnp.ndarray, key) -> AbstractDistribution:
+        # prob(data | p) = f(p). so prob(p | data) ~ f(p) * pi(p)
+        f = self.combine(fc)
+        logit_p = f.sample(key, NUM_SAMPLES)
+
+        @vmap
+        def ll(lp):
+            return logsumexp(binom_logpmf(d, n, logit_p=lp) + jnp.log(theta))
 
 
-def _binom_sampling_admix(
-    fs: SpikedBeta, datum: Dataset, i, key
-) -> tuple[SpikedBeta, float]:
-    """Compute filtering distributions after observing alleles.
+        loglik = ll(logit_p)
+        # LL = log \int p(y|x) p(x) dx ~= log (1/n) \sum_i p(y|x_i) where x_i ~ p(x)
+        lse = logsumexp(loglik)
+        ll = lse - jnp.log(NUM_SAMPLES)
+        weights = jnp.exp(loglik - lse)
+        fp = self._fit(f, logit_p, weights)
+        return self.filter(fp), ll
 
-    Params:
-        fs: initial filtering distribution
-        data: Dataset containing the observed data point
-    """
-    fs0 = fs
-    M = fs.M
-    K = fs.log_p.shape[0]
-    n, d = datum.obs
-    assert fs.log_p.ndim == 2
-    fs1, llk = vmap(_binom_sampling, (None, None, 0))(n, d, fs)
-    log_lam = llk + jnp.log(datum.theta)
-    ll = safe_logsumexp(log_lam)
-    # now compute posteriors
 
-    def combine(f0, f1, log_theta, log_v):
-        # posterior, f(p) \propto f_0(p) [theta*binom(n,d)*p^d(1-p)^n-d + v]
-        # = theta*f1(p) + v*f0(p),  (v = \sum_{-i} theta_j ll_j)
-        a1 = jnp.concatenate([f1.f_x.a, f0.f_x.a])
-        b1 = jnp.concatenate([f1.f_x.b, f0.f_x.b])
-        log_c1 = jnp.concatenate([log_theta + f1.f_x.log_c, log_v + f0.f_x.log_c])
-        bm0 = BetaMixture(a1, b1, log_c1)
-
-        # this is memory hungry
-        @jax.remat
-        def f(bm):
-            return BetaMixture.interpolate(
-                lambda x: bm0(x, log=True), 10 * M, norm=True, log_f=True
-            ).top_k(M)
-
-        bm1 = f(bm0)
-
-        # now compute updated spike probabilities
-        # now compute updated spike probabilities
-        # log p(p=0|data) = log p(data|p=0) + log p(p=0) - log p(data)
-        #                 = log[theta * 1{n=d=0} + v] + log p(p=0) - log p(data)
-        zn = jnp.array([0, n])
-        log_p1 = (
-            vmap(safe_lae, (0, None))(
-                jnp.where((n > 0) & (d == zn), log_theta, -jnp.inf), log_v
-            )
-            + f0.log_p
-            - ll
+    def _forward_helper(self, accum, tup):
+        model0_c, ll0, last_t, key = accum
+        datum, s_t, i = tup
+        key, subkey = jax.random.split(key)
+        model1_c = cond(
+            datum.t != last_t, 
+            self.transition,
+            lambda *args: args[0],
+            model0_c, s_t, subkey
         )
-        return SpikedBeta.safe_init(log_p1, bm1)
-
-    # log_V[i] = \sum_{-i} theta_j ll_j
-    dp = partial(jnp.delete, log_lam, assume_unique_indices=True)
-    log_Vj = vmap(dp)(jnp.arange(K))
-    log_V = vmap(safe_logsumexp)(log_Vj)
-    fs2 = vmap(combine)(fs0, fs1, jnp.log(datum.theta), log_V)
-    return fs2, ll
-
-
-def _tree_where(cond, a, b):
-    return jax.tree.map(partial(jnp.where, cond), a, b)
-
-
-def _forward_helper(accum, tup, Ne):
-    beta0, ll0, last_t, key = accum
-    datum, s_t, i = tup
-    assert beta0.log_p.ndim == 2
-    assert beta0.log_p.shape[1] == 2
-    beta1 = _tree_where(datum.t != last_t, _transition(beta0, s_t, Ne), beta0)
-    # beta1 = eqx.error_if(beta1, cs.any(), msg="spikes >= 1")
-    # now process the observation
-    n, d = datum.obs
-    key, subkey = jax.random.split(key)
-    beta2, ll1 = _tree_where(
-        (datum.t == last_t) & (n > 0),
-        _binom_sampling_admix(beta1, datum, i, subkey),
-        (beta1, 0.0),
-    )
-    ll = ll0 + ll1
-    accum = (beta2, ll, datum.t, key)
-    return accum, beta2
+        n, d = datum.obs
+        model2_c, ll1 = cond(
+            (datum.t == last_t) & (n > 0),
+            self.binom_sampling,
+            lambda *args: (args[0], 0.),
+            model1_c, n, d, datum.theta, key
+        )
+        ll = ll0 + ll1
+        accum = (model2_c, ll, datum.t, key)
+        if __debug__:
+            models = map(self.combine, [model0_c, model1_c, model2_c])
+            samples = jnp.array([m.sample(key, 10_000) for m in models])
+            samples = sigmoid(samples)
+            means = [jnp.mean(s, axis=0) for s in samples]
+            sems = [jnp.std(s, axis=0) / jnp.sqrt(len(s)) for s in samples]
+            covs = [jnp.cov(s, rowvar=False) for s in samples]
+            _debug_print("datum:{}\ns:{}\nmeans:\n{}\nsems:\n{}\ncovs:\n{}\n", datum, s_t, jnp.array(means), jnp.array(sems), jnp.array(covs))
+        return accum, (model2_c, ll1)
 
 
-# @partial(jit, static_argnums=3)
-def forward(s: Selection, Ne: jnp.ndarray, data: Dataset, beta: BetaMixture):
-    """
-    Run the forward algorithm for the BMwS model.
+    def forward(self, sln: Selection, prior_c, data: Dataset, key):
+        """
+        Run the forward algorithm for the BMwS model.
 
-    Args:
-        s: selection coefficient at each time point for each of the K populations (T - 1, K)
-        Ne:  diploid effective population size at each time point for each of the K populations (T - 1, K)
-        data: data to compute likelihood
-        beta: prior distribution on allele frequencies
+        Args:
+            s: selection coefficient at each time point for each of the K populations (T - 1, K)
+            Ne:  diploid effective population size at each time point for each of the K populations (T - 1, K)
+            data: data to compute likelihood
+            beta: prior distribution on allele frequencies
 
-    Returns:
-        Tuple (betas, lls). betas [T, K, M] are the filtering distributions, and lls are the conditional likelihoods.
-    """
-    ninf = jnp.full([data.K, 2], -jnp.inf)
-    beta0 = SpikedBeta(ninf, beta)
-    s_t = s(data.t)
-    init = (beta0, 0.0, data.t[0], jax.random.PRNGKey(1))
+        Returns:
+            Tuple (betas, lls). betas [T, K, M] are the filtering distributions, and lls are the conditional likelihoods.
+        """
+        s = sln(data.t)
+        init = (prior_c, 0.0, data.t[0], key)
+        seq = (data, s, jnp.arange(len(s)))
 
-    if os.environ.get("BMWS_UNROLL_FORWARD"):
-        logger.warning("Compiling unrolled forward loop!")
-        # compile-free loop for debugging
-        betas = []
-        state = init
-        for i in range(1, len(data.t)):
-            state, beta = _forward_helper(
-                state,
-                jax.tree.map(lambda x: x[i], (data, s_t, Ne_t)) + (i,),
-            )
-            betas.append(beta)
-            ll = state[1]
-    else:
-        (_, ll, _, _), betas = lax.scan(
-            partial(_forward_helper, Ne=Ne),
+        (_, ll, _, _), (models, lls) = scan(
+            self._forward_helper,
             init,
-            (data, s_t, jnp.arange(len(s_t))),
+            seq
         )
 
-    return betas, ll
+        return models, dict(ll=ll)
 
 
-def loglik(s, Ne, data: Dataset, beta0: BetaMixture):
-    return forward(s=s, Ne=Ne, data=data, beta=beta0)[1]
+    def sample_paths(self, sln: Selection, prior_c, data: Dataset, key, k: int=1):
+        """
+        Sample paths from the model.
+
+        Args:
+            models: list of models
+            sln: selection coefficients
+            data: data to sample from
+            k: number of samples to draw
+
+        Returns:
+            Tuple (t, y). t is the time points, and y is the sampled paths.
+        """
+        key, subkey = jax.random.split(key)
+        models, aux =  self.forward(sln, prior_c, data, subkey)
+        keys = jax.random.split(key, k)
+        ts, paths = vmap(lambda k: self._sample_path(models, sln, data, k))(keys)
+        return ts[0], paths, aux
 
 
-def _construct_prior(prior: Union[int, BetaMixture]) -> BetaMixture:
-    if isinstance(prior, int):
-        M = prior
-        prior = BetaMixture.uniform(M)
-    return prior
+    def _sample_path(self, models, sln: Selection, data: Dataset, key):
+        models = self.filter(models)
+        model0, models = [
+            jax.tree.map(lambda a: a[sl], models)
+            for sl in [-1, slice(None, -1)]
+        ]
+        mask = data.t[:-1] != data.t[1:]
+        models_mask, t_mask = jax.tree.map(lambda a: a[mask], (models, data.t[:-1]))
+        key0, key1, key2 = jax.random.split(key, 3)
+        l0 = self.combine(model0).sample(key0)[0]
+        p0 = sigmoid(l0)
+        # y0 = random_binomial_large_N(key1, 2 * Ne, p0).astype(int)
+
+        init = (p0, key2)
+        s = sln(t_mask)
+        seq = (models_mask, s, t_mask)
+
+        def f(accum, carry):
+            pi, key = accum
+            model_c, si, ti = carry
+            model = self.combine(model_c)
+            key, subkey = jax.random.split(key)
+            # yi | y ~ binom(Ne, p(s, y / Ne))
+            logit_p = model.sample(subkey, NUM_SAMPLES)
+            logit_pp = logit_p_prime(si, logit_p=logit_p)
+            yi = (pi * (2 * Ne)).astype(int)
+            log_ps = binom_logpmf(yi, 2 * Ne, logit_p=logit_pp).sum(1)
+            a = sample_one_categorical(subkey, logits=log_ps)
+            logit_p = logit_p[a]
+            p = sigmoid(logit_p)
+            return (p, key), (ti, logit_p)
+
+        t, samples = lax.scan(f, init, seq, reverse=True)[1]
+        return jnp.append(t, data.t[-1]), jnp.concatenate([samples, l0[None]])
+    
+
+    def em(self, sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5):
+        def trans(logit_p1, p0, s):
+            logit_pp = logit_p_prime(s=s, logit_p=logit_p1)
+            # binom(2 * Ne, 2 * Ne * p0, pp) => 
+            # lls = 2 * Ne * (xlogy(p0, pp) + xlog1py(1 - p0, 1. - pp)) + const
+            # = 2 * Ne * binary_cross_entropy(label=p0, pp)
+
+            @vmap
+            def bce(label, logit):
+                # binary cross entropy in logit domain
+                return jnp.maximum(logit, 0) - logit * label + jnp.logaddexp(0.0, -jnp.abs(logit))
+
+            # note: bce = loss = -ll
+            return 2 * Ne * -bce(label=p0, logit=logit_pp).sum()
+
+
+        def obj(sln, args):
+            logit_paths, t = args
+            s = sln(t[1:])  # t
+
+            @vmap
+            def f(logit_p1i, p0i):
+                lls = vmap(trans)(logit_p1i, p0i, s)
+                return lls.sum()
+
+            lls = f(logit_paths[:, :-1], sigmoid(logit_paths[:, 1:]))
+            BOUND = 0.1
+            bound_pen = jax.nn.relu(jnp.abs(s) - BOUND).sum()
+            ret = -lls.mean() + 100. * bound_pen
+            return jnp.where(~jnp.isfinite(ret), jnp.inf, ret)
+
+        def prox(sln, l1reg, scaling):
+            prox_s = vmap(flsa, (1, None), 1)(sln.s, l1reg * scaling)
+            return replace(sln, s=prox_s)
+
+        opt = jaxopt.ProximalGradient(obj, prox)
+
+        def step(sln, logit_paths, t):
+            with jax.debug_nans(False):
+                # return optx.minimise(obj, bfgs, sln, args=(logit_paths, t), max_steps=None).value
+                res = opt.run(sln, hyperparams_prox=alpha, args=(logit_paths, t))
+                return res.params
+
+        def sample_paths(sln, prior_c, key):
+            return self.sample_paths(sln, prior_c, data, key=key, k=NUM_SAMPLES)
+
+        fit = self._fit_c
+
+        if not __debug__:
+            step, sample_paths, fit = map(jit, (step, sample_paths, fit))
+
+        sln = sln0
+        prior_c = self.filter(self.prior)
+
+        lls = []
+        last_lls = None
+
+        for i in range(em_iterations):
+            t, logit_paths, aux = sample_paths(sln, prior_c, self.get_key())
+            lls.append(float(aux['ll']))
+            sln = step(sln, logit_paths=logit_paths, t=t)
+            logit_p0 = logit_paths[:, 0]
+            paths = sigmoid(logit_paths).mean(0)
+            s = sln(t)
+            gp.plot(np.array(lls), _with="lines", title="lls", terminal="dumb 120,20", unset="grid")
+            gp.plot(*[(t[::-1], y[::-1]) for y in paths.T], _with="lines", title="afs", terminal="dumb 120,30", unset="grid")
+            gp.plot(*[(t[::-1], y[::-1]) for y in s.T], _with="lines", title="selection", terminal="dumb 120,30", unset="grid")
+            self.prior = self.prior.refit(logit_p0)
+            prior_c = self.filter(self.prior)
+
+        return sln, self.combine(prior_c)
+
+
+## TESTS
+import pytest
+
+@pytest.fixture
+def rng():
+    return np.random.default_rng(0)
+
+def test_logit_p_prime(rng):
+    p = rng.uniform(0, 1, (100,))
+    s = rng.uniform(-1, 1, (100,))
+    logit_p = logit(p)
+    logit_p1 = logit_p_prime(s, logit_p=logit_p)
+    p1 = sigmoid(logit_p1)
+    p2 = p_prime(s, p)
+    np.testing.assert_allclose(p1, p2)
