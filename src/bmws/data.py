@@ -1,3 +1,4 @@
+import random
 from typing import NamedTuple, TypedDict
 
 import jax
@@ -55,6 +56,20 @@ class Dataset(NamedTuple):
             records: list of dictionaries. each dictionary should have keys 't' (time before present when then individuals were sampled),
                 'theta' (admixture loadings), 'n' (number of alleles observed), and 'd' (number of derived alleles observed.).
         """
+        # expand records so that there is just one binomial observation per record
+        records = [
+            dict(t=r["t"], theta=r["theta"], obs=[1, 1])
+            for r in records
+            for _ in range(r["obs"][1])
+        ]
+        records.extend(
+            [
+                dict(t=r["t"], theta=r["theta"], obs=[1, 0])
+                for r in records
+                for _ in range(r["obs"][0] - r["obs"][1])
+            ]
+        )
+        random.shuffle(records)
         T_MIN = min(r["t"] for r in records)
         T_MAX = max(r["t"] for r in records)
         K = len(records[0]["theta"])

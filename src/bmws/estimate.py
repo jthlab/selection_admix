@@ -17,14 +17,7 @@ from jax.scipy.special import betaln, logsumexp, xlog1py, xlogy
 from loguru import logger
 from scipy.optimize import minimize
 
-from bmws.betamix import (
-    BetaMixture,
-    _construct_prior,
-    _transition,
-    forward,
-    loglik,
-    safe_lae,
-)
+from bmws.betamix import Selection, forward
 from bmws.data import Dataset
 
 
