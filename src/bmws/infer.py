@@ -27,6 +27,8 @@ class Selection:
 
     def __call__(self, xq, derivative=0):
         assert xq.ndim == 1
+        return self.s[xq]
+
         t = self.t
 
         def f(si):
@@ -56,7 +58,30 @@ def logit_p_prime(s, logit_p):
     return logit_p + jnp.log1p(s / 2)
 
 
-def em(sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5, seed=42, N_E=1e4):
+def sample_paths(sln, prior, data, num_paths, N_E, key):
+    td = data.t[1:] != data.t[:-1]
+    t_diff = np.r_[data.t[0], data.t[1:][td]]
+    seeds = list(map(int, jax.random.randint(key, (2,), 0, 2**31 - 1)))
+    # have to convert to np.array because of buffer protocol stuff
+    print(expit(prior).mean(0))
+    ll = np.zeros(1)
+    theta = data.theta.clip(1e-5, 1 - 1e-5)
+    theta /= theta.sum(1, keepdims=True)
+    # breakpoint()
+    alpha = forward_filter(
+        *map(np.array, (data.obs[:, 1], theta, sln(data.t), data.t, prior)),
+        seeds[0],
+        ll,
+        N_E,
+    )
+    alpha_diff = np.concatenate([alpha[1:][td], alpha[-1:]])
+    paths = backward_sample_batched(alpha_diff, sln(t_diff), N_E, num_paths, seeds[1])
+    # paths[:, 0] corresponds to alpha[-1], i.e. t=0
+    # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
+    return jnp.array(paths)[:, ::-1], t_diff, ll, alpha_diff
+
+
+def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4):
     def trans(logit_p1, p0, s):
         logit_pp = logit_p1 + jnp.log1p(s / 2)
         # binom(2 * Ne, 2 * Ne * p0, pp) =>
@@ -106,32 +131,9 @@ def em(sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5, seed=42, N_E=
 
     # assumption: data always starts and ends with an observation (not a transition)
     # illustration: t = [5, 5, 4, 3, 2, 1, 0, 0, 0]
-    td = data.t[1:] != data.t[:-1]
-    t_diff = np.r_[data.t[0], data.t[1:][td]]
 
-    NUM_PARTICLES = 10_000
+    NUM_PARTICLES = M
     NUM_PATHS = NUM_PARTICLES
-
-    def sample_paths(sln, prior, key):
-        seeds = list(map(int, jax.random.randint(key, (2,), 0, 2**31 - 1)))
-        # have to convert to np.array because of buffer protocol stuff
-        print(expit(prior).mean(0))
-        ll = np.zeros(1)
-        theta = data.theta.clip(1e-5, 1 - 1e-5)
-        theta /= theta.sum(1, keepdims=True)
-        alpha = forward_filter(
-            *map(np.array, (data.obs[:, 1], theta, sln(data.t), data.t, prior)),
-            seeds[0],
-            ll,
-            N_E,
-        )
-        alpha_diff = np.concatenate([alpha[1:][td], alpha[-1:]])
-        paths = backward_sample_batched(
-            alpha_diff, sln(t_diff), N_E, NUM_PATHS, seeds[1]
-        )
-        # paths[:, 0] corresponds to alpha[-1], i.e. t=0
-        # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
-        return jnp.array(paths)[:, ::-1], ll
 
     if not __debug__:
         step = jit(step)
@@ -139,20 +141,25 @@ def em(sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5, seed=42, N_E=
     key = jax.random.PRNGKey(seed)
     key, subkey = jax.random.split(key)
     sln = sln0
-    prior = logit(jax.random.beta(subkey, 1, 100.0, (NUM_PARTICLES, data.K)))
+    prior = logit(jax.random.beta(subkey, 1.0, 1000.0, (NUM_PARTICLES, data.K)))
 
     lls = []
     last_lls = None
 
+    ret = []
+
     for i in range(em_iterations):
         assert prior.shape == (NUM_PARTICLES, data.K)
         key, subkey = jax.random.split(key)
-        logit_paths, ll = sample_paths(sln, prior, subkey)
+        logit_paths, t_diff, ll, ffd = sample_paths(
+            sln, prior, data, NUM_PARTICLES, N_E, subkey
+        )
         lls = np.append(lls, ll)
         # since time runs backwards (see above) logit_paths[:, 0]
         # is the distribution at the most ancient time point
         prior = logit_paths[:, 0]
         paths = jax.nn.sigmoid(logit_paths).mean(0)
+        ffd = jax.nn.sigmoid(ffd).mean(1)
         gp.plot(
             *[(t_diff[::-1], y[::-1]) for y in paths.T],
             _with="lines",
@@ -160,7 +167,14 @@ def em(sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5, seed=42, N_E=
             terminal="dumb 120,30",
             unset="grid",
         )
-        if (i > 0) * (i % 5 == 0):
+        gp.plot(
+            *[(t_diff[::-1], y[::-1]) for y in ffd.T],
+            _with="lines",
+            title="ffd",
+            terminal="dumb 120,30",
+            unset="grid",
+        )
+        if i > 10:
             sln = step(sln, logit_paths=logit_paths, t=t_diff)
             s = sln(t_diff)
             gp.plot(
@@ -171,5 +185,6 @@ def em(sln0: Selection, data: Dataset, alpha=1.0, em_iterations=5, seed=42, N_E=
                 unset="grid",
             )
         print(lls)
+        ret.append((sln, prior))
 
-    return sln, prior
+    return (sln, prior), ret

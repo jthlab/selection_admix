@@ -57,24 +57,24 @@ class Dataset(NamedTuple):
                 'theta' (admixture loadings), 'n' (number of alleles observed), and 'd' (number of derived alleles observed.).
         """
         # expand records so that there is just one binomial observation per record
-        records = [
+        new_records = [
             dict(t=r["t"], theta=r["theta"], obs=[1, 1])
             for r in records
             for _ in range(r["obs"][1])
         ]
-        records.extend(
+        new_records.extend(
             [
                 dict(t=r["t"], theta=r["theta"], obs=[1, 0])
                 for r in records
                 for _ in range(r["obs"][0] - r["obs"][1])
             ]
         )
-        random.shuffle(records)
-        T_MIN = min(r["t"] for r in records)
-        T_MAX = max(r["t"] for r in records)
-        K = len(records[0]["theta"])
+        random.shuffle(new_records)
+        T_MIN = min(r["t"] for r in new_records)
+        T_MAX = max(r["t"] for r in new_records)
+        K = len(new_records[0]["theta"])
         assert all(
-            len(r["theta"]) == K for r in records
+            len(r["theta"]) == K for r in new_records
         ), "All records must have the same number of admixture loadings."
         pi = jnp.ones(K) / K
         dss = []
@@ -84,11 +84,15 @@ class Dataset(NamedTuple):
                     Dataset(
                         t=r["t"], theta=jnp.array(r["theta"]), obs=jnp.array(r["obs"])
                     )
-                    for r in records
+                    for r in new_records
                     if r["t"] == t
                 ]
             )
             # transition "dummy record" to move the ts one step towards present
             if t > T_MIN:
                 dss.append(Dataset(t=t - 1, theta=pi, obs=jnp.array([0, 0])))
-        return tree_stack(dss)
+        ret = tree_stack(dss)
+        assert ret.t.max() == T_MAX
+        assert ret.t.min() == T_MIN
+        assert len(ret.obs) == len(records) + T_MAX
+        return ret

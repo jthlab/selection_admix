@@ -1,3 +1,17 @@
+# code snippet to be included in sitecustomize.py
+# Needs Python 2.1 or later!
+import sys
+import pdb
+import traceback
+
+def info(type, value, tb):
+    traceback.print_exception(type, value, tb)
+    # ...then start the debugger in post-mortem mode
+    pdb.pm()
+
+# sys.excepthook = info
+
+
 import pickle
 import numpy as np
 import bmws.data
@@ -5,12 +19,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from bmws.estimate import estimate, empirical_bayes, sample_paths, Selection
+from bmws.infer import Selection, em, sample_paths
+from bmws.util import tree_stack
+import bmws.data
 
 import jax
+import jax.numpy as jnp
 
+N_E = 1e4
 
-def plot_trajectories(pop, outfile, s, s_samples, paths, data):
+def plot_trajectories(pop, outfile, sln, sln_samples, paths, data):
     pop_cols = {
         "EAS": ["#2F5233", "#B1D8B7", "#76B947"],
         "EUR": ["#BBD2FD", "#63D5F9", "#2A67D6"],
@@ -18,27 +36,34 @@ def plot_trajectories(pop, outfile, s, s_samples, paths, data):
         "SAS": ["#AE307F", "#6E2ED9"],
         "AFR": ["#FF8247", "#CD853F", "#E8AD17"],
     }
+    pop_cols["TEST"] = pop_cols["EAS"]
     cols = pop_cols[pop]
     K = len(cols)
 
-    high = np.quantile(s_samples, 0.05, axis=0)
-    low = np.quantile(s_samples, 0.95, axis=0)
+    t = np.arange(data.T)
+
+    def f(si):
+        return si(t)
+    
+    s = sln(t)
+    s_samples = jax.vmap(lambda si: si(t))(sln_samples)
+
+    low = np.quantile(s_samples, 0.05, axis=0)  # [T, K]
+    high = np.quantile(s_samples, 0.95, axis=0)
 
     fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
     for k in range(K):
         axs[0].plot(s[:, k], color=cols[k], alpha=1)
         axs[0].fill_between(
-            range(s_samples.shape[2]), low[k], high[k], alpha=0.2, color=cols[k]
+            range(s.shape[0]), low[:, k], high[:, k], alpha=0.2, color=cols[k]
         )
-
-    axs[0].set_ylim(0.0, 0.1)
 
     high = np.max(paths, axis=0)
     low = np.min(paths, axis=0)
     for k in range(K):
-        axs[1].plot(np.mean(paths, axis=0)[k][::-1], color=cols[k])
+        axs[1].plot(np.mean(paths, axis=0)[k], color=cols[k])
         axs[1].fill_between(
-            range(paths.shape[2]), low[k][::-1], high[k][::-1], alpha=0.2, color=cols[k]
+            range(paths.shape[2]), low[k], high[k], alpha=0.2, color=cols[k]
         )
 
     a, b = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
@@ -93,23 +118,37 @@ def read_data(pop):
 
     return datasets, snps
 
-def run_analysis(data, alpha=1e4, beta=1, gamma=0, em_iterations=10, M=100):
-    M = 100
-    Ne = 1e4
-    s = Selection(T=data.T, s=np.zeros([20, data.K]))
-    ab = np.ones([2, data.K]) + 1e-4
-    estimate_kwargs = {"alpha": alpha, "beta": beta, "gamma": gamma}
-
-    print("Analysis")
-    print("alpha=" + str(alpha) + "; beta=" + str(beta))
-    for i in range(em_iterations):
-        print("Iteration " + str(i))
-        ab, prior = empirical_bayes(ab0=ab, s=s, data=data, Ne=Ne, M=M)
-        s = estimate(s0=s, data=data, Ne=Ne, prior=prior, **estimate_kwargs)
-    return s, prior, Ne
+def run_analysis(data, sln0=None, alpha=1e4, em_iterations=50, M=10_000):
+    if sln0 is None:
+        sln0 = Selection.default(T=data.T, K=data.K)
+    return em(sln0=sln0, data=data, alpha=alpha, em_iterations=em_iterations, M=M, seed=42, N_E=N_E)
 
 
-def resample_individuals(data, rng, em_iterations, alpha, beta):
+def bootstrap(sln, data, prior, rng, em_iterations, alpha, M):
+    t = data.t
+    theta = data.theta
+    obs = data.obs
+    records = []
+    Tmax = int(max(t))
+    seed = rng.integers(0, 2 ** 32 - 1)
+    key = jax.random.key(seed)
+    paths = sample_paths(s, prior, data, 1, N_E, key)[0]
+    for k in range(obs.shape[0]):
+        n = int(obs[k][0])
+        rec = {'t': int(t[k])}
+        p = rng.choice(paths[:,int(t[k])], p=data.theta[k])
+        rec['obs'] = (n, rng.binomial(n, p))
+        rec['theta'] = data.theta[k]
+        records.append(rec)
+    
+    ds = bmws.data.Dataset.from_records(records)
+    (sln_star, prior), aux = run_analysis(
+        ds, alpha=alpha, em_iterations=em_iterations, M=M,
+    )
+    return sln_star, ds
+
+
+def resample_individuals(data, Ne, rng, em_iterations, alpha, M):
     # Now resample observations
     t = data.t
     theta = data.theta
@@ -137,10 +176,8 @@ def resample_individuals(data, rng, em_iterations, alpha, beta):
         records.append(rec)
     dataset_samples = bmws.data.Dataset.from_records(records)
     # run inference
-    s_s, prior_s, Ne_s = run_analysis(
-        dataset_samples, alpha=alpha, beta=beta, em_iterations=em_iterations
-    )
-    return s_s
+    (sln_star, prior), aux = run_analysis(dataset_samples, alpha=alpha, em_iterations=em_iterations, M=M)
+    return sln_star, dataset_samples
 
 
 def dump_file(obj, fn):
@@ -211,17 +248,18 @@ rule read_data:
 
 def _params(wc):
     alpha = 10 ** float(wc.log_alpha)
-    beta = 10 ** float(wc.log_beta)
     em_iterations = int(wc.em_iterations)
-    return alpha, beta, em_iterations
+    M = int(wc.M)
+    return alpha, em_iterations, M
 
 
 rule analyze:
     input:
         "results/{population}/data.pkl",
     output:
-        "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/analyze.pkl",
+        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl",
     resources:
+        gpus=1,
         runtime=720,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
@@ -229,33 +267,40 @@ rule analyze:
     run:
         datasets, snps = load_file(input[0])
         wc = wildcards
-        data = datasets[snps.index(wc.snp)]
-        alpha, beta, em_iterations = _params(wildcards)
-        gamma = 0.0
-        res = run_analysis(data, alpha, beta, gamma, em_iterations)
-        dump_file((res, (alpha, beta, gamma, em_iterations)), output[0])
+        M = int(wc.M)
+        try:
+            data = datasets[snps.index(wc.snp)]
+        except ValueError:
+            raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
+        Ne = 1e4
+        alpha, em_iterations, M = _params(wildcards)
+        sln0 = Selection.default(T=data.T, K=data.K)
+        res = em(sln0, data, alpha, em_iterations, M, seed=42)
+        dump_file(res, output[0])
 
 
 rule sample_paths:
     input:
         "results/{population}/data.pkl",
-        "results/{population}/{snp}/{stuff}/analyze.pkl",
+        "results/{population}/{snp}/{stuff}/M{M}/analyze.pkl",
     output:
-        "results/{population}/{snp}/{stuff}/paths.pkl",
+        "results/{population}/{snp}/{stuff}/M{M}/paths.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        (s, prior, Ne), _ = load_file(input[1])
-        res = sample_paths(s, Ne, data, prior, 10)
-        dump_file(res, output[0])
+        (sln, prior), aux = load_file(input[1])
+        key = jax.random.key(42)
+        paths, _, _ = sample_paths(sln, prior, data, int(wildcards.M), N_E, key)
+        dump_file(paths, output[0])
 
 
 rule resample:
     input:
         "results/{population}/data.pkl",
+        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     output:
-        "results/{population}/{snp}/a{log_alpha}/b{log_beta}/em{em_iterations}/resample_{seed}.pkl",
+        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
     resources:
         gpus=1,
         slurm_partition="spgpu,gpu",
@@ -264,11 +309,13 @@ rule resample:
         runtime=720,
     run:
         datasets, snps = load_file(input[0])
+        (sln, prior), aux = load_file(input[1])
         data = datasets[snps.index(wildcards.snp)]
-        alpha, beta, em_iterations = _params(wildcards)
+        alpha, em_iterations, M = _params(wildcards)
         seed = int(wildcards.seed)
         rng = np.random.default_rng(seed)
-        res = resample_individuals(data, rng, em_iterations, alpha, beta)
+        res = resample_individuals(data, N_E, rng, em_iterations, alpha, M)
+        # res = bootstrap(s, data, Ne, prior, rng, em_iterations, alpha, M)
         dump_file(res, output[0])
 
 
@@ -279,8 +326,8 @@ rule collect_resamples:
     output:
         "results/{stuff}/resamples.pkl",
     run:
-        ss = list(map(load_file, input))
-        S = np.stack([np.transpose(sbar + ds) for sbar, ds in ss], axis=0)
+        ss = [s for s, _ in map(load_file, input)]
+        S = tree_stack(ss)
         dump_file(S, output[0])
 
 
@@ -297,11 +344,11 @@ rule plot:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        ((s_bar, ds), prior, Ne), _ = load_file(input[1])
-        s = s_bar + ds
+        (sln, prior), _ = load_file(input[1])
         paths = load_file(input[2])
-        s_samples = load_file(input[3])
-        plot_trajectories(wildcards.population, output[0], s, s_samples, paths, data)
+        sln_samples = load_file(input[3])
+        plot_trajectories(wildcards.population, output[0], sln, sln_samples, paths, data)
+
 
 rule altplot:
     input:

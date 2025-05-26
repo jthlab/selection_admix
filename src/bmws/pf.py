@@ -14,13 +14,14 @@ def logit(x):
     """
     Numerically stable logit function.
     """
+    x_safe = np.where(np.isclose(x, 0.0) | np.isclose(x, 1.0), 0.5, x)
     return np.where(
         np.isclose(x, 0.0),
         -np.inf,
         np.where(
             np.isclose(x, 1.0),
             np.inf,
-            np.log(x / (1 - x)),
+            np.log(x_safe / (1 - x_safe)),
         ),
     )
 
@@ -88,7 +89,7 @@ def logsumexp(a):
     return a_max + np.log(np.sum(np.exp(a - a_max)))
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True)
 def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
     """
     Forward algorithm for the particle filter.
@@ -149,8 +150,9 @@ def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
             # diversity = len(np.unique(inds))
             # other_inds = np.random.choice(p, p=np.exp(log_weights - lse), replace=True, size=p)
             # other_diversity = len(np.unique(other_inds))
-        # print("i:{} trans:{} t:{} obs:{} mean_p:{} ll:{}".format(
+        # print("i:{} trans:{} theta:{} t:{} obs:{} mean_p:{} ll:{}".format(
         #     i, tr,
+        #     thetas[i],
         #     t[i], obs[i], np.mean(expit(particles), 0),
         #     ll,
         # ))
@@ -159,7 +161,7 @@ def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
     return alpha
 
 
-@njit(nogil=True, cache=True)
+@njit(nogil=True)
 def backward_sample(alpha, s, seed, N_E):
     n, p, d = alpha.shape
     ret = np.full((n, d), np.nan)
@@ -238,6 +240,8 @@ def backward_sample_batched(
         ret: (B, n, d) float32 array of samples.
     """
     n, p, d = alpha.shape
+    assert n <= MAX_N
+    assert d <= MAX_D
     threads_per_block = 64
     blocks = (B + threads_per_block - 1) // threads_per_block
 

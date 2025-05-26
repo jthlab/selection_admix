@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from pytest import fixture
 
 from bmws.data import Dataset
-from bmws.betamix import _transition, _binom_sampling, _binom_sampling_admix, forward, SpikedBeta, BetaMixture
+from bmws.betamix import forward, SparseDiscrete, Selection
 
 @fixture(params=[1, 5])
 def K(request):
@@ -95,13 +95,11 @@ def test_dataset_forward():
         dict(t=10, theta=np.array([.5, 0., .5]), obs=(1, 1)),
         dict(t=2, theta=np.array([.5, .2, .3]), obs=(10, 5)),
         dict(t=0, theta=np.array([.2, .2, .6]), obs=(3, 0)),
-        ]
+        ][:2]
     )
-    s = np.zeros([21, 3])
-    Ne = np.full_like(s, 1e4)
+    s = Selection(T=21, s=np.zeros([21, 3]))
     data = ds
-    pi = jax.vmap(lambda _: BetaMixture.uniform(20))(jnp.arange(3))
+    pi = [(1., 100.), (1., 100.), (1., 100)]
     res = forward(s, Ne, data, pi)
     breakpoint()
     print(res)
-
