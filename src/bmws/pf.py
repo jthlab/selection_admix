@@ -2,67 +2,12 @@
 
 import math
 
+import numba
 import numpy as np
-from numba import config, cuda, float32, njit, prange, vectorize
+from numba import config, cuda, njit, prange, vectorize
 from numba.cuda.random import create_xoroshiro128p_states
 
 config.CUDA_ENABLE_PYNVJITLINK = 1
-
-
-@njit
-def logit(x):
-    """
-    Numerically stable logit function.
-    """
-    x_safe = np.where(np.isclose(x, 0.0) | np.isclose(x, 1.0), 0.5, x)
-    return np.where(
-        np.isclose(x, 0.0),
-        -np.inf,
-        np.where(
-            np.isclose(x, 1.0),
-            np.inf,
-            np.log(x_safe / (1 - x_safe)),
-        ),
-    )
-
-
-@njit
-def expit(x):
-    """
-    Numerically stable sigmoid function.
-    """
-    return np.where(x < 0, np.exp(x) / (1 + np.exp(x)), 1 / (1 + np.exp(-x)))
-
-
-@njit
-def binom_logpmf(y: int, n: int, logit_p: float) -> float:
-    """Log-likelihood of Binomial(y | n, sigmoid(logit_p)) without computing sigmoid."""
-    # omit the expensive to compute binomial coefficient
-    # C = -betaln(n - y + 1, y + 1) - np.log1p(n)
-    return np.where(
-        np.isneginf(logit_p),
-        np.where(y == 0, 0.0, -np.inf),
-        np.where(
-            np.isinf(logit_p),
-            np.where(y == n, 0.0, -np.inf),
-            y * logit_p - n * np.logaddexp(0.0, logit_p),
-        ),
-    )
-
-
-@cuda.jit(device=True)
-def binom_logpmf_gpu(y: int, n: int, logit_p: float) -> float:
-    """CUDA device function: log P(Y=y | Binomial(n, sigmoid(logit_p)))."""
-    if logit_p == float("-inf"):
-        return 0.0 if y == 0 else float("-inf")
-    elif logit_p == float("inf"):
-        return 0.0 if y == n else float("-inf")
-    else:
-        # logaddexp(0, x) = log(1 + exp(x)), numerically stable
-        if logit_p > 0:
-            return y * logit_p - n * (logit_p + math.log1p(math.exp(-logit_p)))
-        else:
-            return y * logit_p - n * math.log1p(math.exp(logit_p))
 
 
 @njit
@@ -73,6 +18,7 @@ def random_binomial_large_N(n, p):
         return n - np.random.poisson(n * (1 - p))
     z = np.random.normal(n * p, np.sqrt(n * p * (1 - p)))
     k = np.rint(z)
+    # rarely, the gaussian sample can be outside the range [0, n]
     k = np.minimum(k, n)
     k = np.maximum(k, 0)
     return k
@@ -100,38 +46,44 @@ def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
     pi: initial state distribution
     """
     np.random.seed(seed)
-    n = len(obs)
-    p, d = pi.shape
-    alpha = np.full((n, p, d), np.nan)
+    N = len(obs)
+    P, D = pi.shape
+    alpha = np.full((N, P, D), -1, dtype=np.int32)
     particles = pi
-    log_weights = np.empty(p)
-    inds = np.empty(p, dtype=np.int32)
+    log_weights = np.empty(P)
+    inds = np.empty(P, dtype=np.int32)
     ll_out[0] = 0.0
 
     # Recursion
-    for i in range(n):
+    for i in range(N):
         tr = False
         ll = np.nan
         if (i > 0) and (t[i] != t[i - 1]):
             # Resample particles under transition
-            s_t = s[t[i]]
-            lsp = np.log1p(s_t / 2)
-            for j in prange(p):
-                logit_prime = particles[j] + lsp
-                prob = expit(logit_prime)
-                for k in range(d):
-                    n_prime = random_binomial_large_N(2 * N_E, prob[k])
-                    particles[j, k] = logit(n_prime / 2 / N_E)
+            for j in prange(P):
+                for k in range(D):
+                    p = particles[j, k] / 2 / N_E
+                    p_prime = (1 + s[t[i], k] / 2) * p / (1 + s[t[i], k] / 2 * p)
+                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime)
             tr = True
         else:
             # observation
             log_theta = np.log(thetas[i])
-            for j in prange(p):
-                log_p_b = binom_logpmf(obs[i], 1, particles[j])
+            for j in prange(P):
+                n = particles[j]
+                p = n / 2 / N_E
+                # prevent runtime warnings
+                p_safe = np.where((n == 0) | (n == 2 * N_E), 0.5, p)
+                log_p_b = obs[i] * np.log(p_safe) + (1 - obs[i]) * np.log1p(-p_safe)
+                # Handle edge cases for log_p_b
+                log_p_b = np.where((obs[i] == 0) & (n == 0), 0.0, log_p_b)
+                log_p_b = np.where((obs[i] == 1) & (n == 0), -np.inf, log_p_b)
+                log_p_b = np.where((obs[i] == 0) & (n == 2 * N_E), -np.inf, log_p_b)
+                log_p_b = np.where((obs[i] == 1) & (n == 2 * N_E), 0.0, log_p_b)
                 log_weights[j] = logsumexp(log_p_b + log_theta)
             # resample particles according to weights
             lse = logsumexp(log_weights)
-            ll = lse - np.log(p)
+            ll = lse - np.log(P)
             ll_out[0] += ll
             if ~np.isfinite(ll_out[0]):
                 print(ll)
@@ -141,8 +93,8 @@ def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
                 print(log_theta)
                 print(obs[i])
                 assert False
-            for j in prange(p):
-                g = np.random.gumbel(0.0, 1.0, p)
+            for j in prange(P):
+                g = np.random.gumbel(0.0, 1.0, P)
                 inds[j] = np.argmax(g + log_weights)
             particles = particles[inds]
             # if i >= 199:
@@ -184,6 +136,33 @@ MAX_N = 400
 MAX_D = 4
 
 
+@cuda.jit(device=True)
+def binom_logpmf_gpu(x, n, p):
+    """
+    Compute the log PMF of a binomial distribution.
+    x: number of successes
+    n: number of trials
+    p: probability of success
+    """
+    if p <= 0 or p >= 1:
+        return float("-inf")
+    if x < 0 or x > n:
+        return float("-inf")
+    if p == 0.0:
+        return 0.0 if x == 0 else float("-inf")
+    if p == 1.0:
+        return 0.0 if x == n else float("-inf")
+    log_p = math.log(p)
+    log_q = math.log1p(-p)
+    return (
+        math.lgamma(n + 1)
+        - math.lgamma(x + 1)
+        - math.lgamma(n - x + 1)
+        + x * log_p
+        + (n - x) * log_q
+    )
+
+
 @cuda.jit
 def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
     b = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
@@ -191,23 +170,25 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
     if b >= B:
         return
 
-    n, p, d = alpha.shape
-    shared_ret = cuda.local.array(shape=(MAX_N, MAX_D), dtype=float32)
+    N, P, D = alpha.shape
+    shared_ret = cuda.local.array(shape=(MAX_N, MAX_D), dtype=numba.int32)
 
     # Step 0
-    j = int(cuda.random.xoroshiro128p_uniform_float32(rng_states, b) * p)
-    for k in range(d):
-        shared_ret[0, k] = alpha[n - 1, j, k]
+    j = int(cuda.random.xoroshiro128p_uniform_float32(rng_states, b) * P)
+    for k in range(D):
+        shared_ret[0, k] = alpha[N - 1, j, k]
 
-    for i in range(1, n):
+    for i in range(1, N):
         max_score = float("-inf")
         argmax_j = -1
-        for j in range(p):
+        for j in range(P):
             log_w = 0.0
-            for k in range(d):
-                p0 = (1 + math.tanh(shared_ret[i - 1, k] / 2)) / 2  # sigmoid
-                logit_p1 = alpha[n - 1 - i, j, k] + math.log1p(s[n - i - 1, k] / 2.0)
-                log_w += 2 * N_E * binom_logpmf_gpu(p0, 1, logit_p1)
+            for k in range(D):
+                s_t = s[N - i - 1, k]
+                n1 = shared_ret[i - 1, k]
+                p0 = alpha[N - 1 - i, j, k] / 2 / N_E
+                p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
+                log_w += binom_logpmf_gpu(n1, 2 * N_E, p_prime)
             g = -math.log(
                 -math.log(cuda.random.xoroshiro128p_uniform_float32(rng_states, b))
             )
@@ -215,11 +196,11 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
             if score > max_score:
                 max_score = score
                 argmax_j = j
-        for k in range(d):
-            shared_ret[i, k] = alpha[n - 1 - i, argmax_j, k]
+        for k in range(D):
+            shared_ret[i, k] = alpha[N - 1 - i, argmax_j, k]
 
-    for i in range(n):
-        for k in range(d):
+    for i in range(N):
+        for k in range(D):
             ret[b, i, k] = shared_ret[i, k]
 
 
@@ -239,16 +220,16 @@ def backward_sample_batched(
     Returns:
         ret: (B, n, d) float32 array of samples.
     """
-    n, p, d = alpha.shape
-    assert n <= MAX_N
-    assert d <= MAX_D
+    N, P, D = alpha.shape
+    assert N <= MAX_N
+    assert D <= MAX_D
     threads_per_block = 64
     blocks = (B + threads_per_block - 1) // threads_per_block
 
     # Allocate device memory
-    alpha_d = cuda.to_device(alpha.astype(np.float32))
+    alpha_d = cuda.to_device(alpha.astype(np.int32))
     s_d = cuda.to_device(s.astype(np.float32))
-    ret_d = cuda.device_array((B, n, d), dtype=np.float32)
+    ret_d = cuda.device_array((B, N, D), dtype=np.int32)
 
     # RNG
     rng_states = create_xoroshiro128p_states(B, seed=seed)
