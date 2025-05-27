@@ -187,24 +187,24 @@ wildcard_constraints:
     snp=r"\w+",
 
 
-def input_for_all(wc):
-    lst = []
-    for pop in ["EAS", "EUR", "SAM", "SAS", "AFR"]:
-        counts = pd.read_csv("data/" + pop.lower() + "_snp_acs.raw", sep="\t")
-        snps = list(counts.columns)[6:]
-        lst.extend([(pop, s) for s in snps])
-
-    return [
-        f"results/{pop}/{snp}/a4.5/b1/em10/resample_{i}.pkl"
-        for pop, snp in lst
-        for i in range(10)
-    ]
-
-
-rule all:
-    input:
-        input_for_all,
-
+# def input_for_all(wc):
+#     lst = []
+#     for pop in ["EAS", "EUR", "SAM", "SAS", "AFR"]:
+#         counts = pd.read_csv("data/" + pop.lower() + "_snp_acs.raw", sep="\t")
+#         snps = list(counts.columns)[6:]
+#         lst.extend([(pop, s) for s in snps])
+# 
+#     return [
+#         f"results/{pop}/{snp}/a4.5/b1/em10/resample_{i}.pkl"
+#         for pop, snp in lst
+#         for i in range(10)
+#     ]
+# 
+# 
+# rule all:
+#     input:
+#         input_for_all,
+# 
 
 rule read_data_test:
     output:
@@ -251,7 +251,7 @@ rule analyze:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl",
     resources:
         gpus=1,
-        runtime=720,
+        runtime=60,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -278,6 +278,12 @@ rule sample_paths:
     output:
         "results/{population}/{snp}/{stuff}/M{M}/paths.pkl",
     threads: 8
+    resources:
+        gpus=1,
+        runtime=60,
+        slurm_partition="spgpu,gpu",
+        slurm_extra="--gpus 1",
+        mem="16G",
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -297,10 +303,10 @@ rule resample:
     threads: 8
     resources:
         gpus=1,
+        runtime=60,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
-        runtime=720,
     run:
         datasets, snps = load_file(input[0])
         (sln, prior), aux = load_file(input[1])
@@ -320,6 +326,7 @@ rule collect_resamples:
     output:
         "results/{stuff}/resamples.pkl",
     run:
+        jax.config.update("jax_platforms", "cpu")
         ss = [s for s, _ in map(load_file, input)]
         S = tree_stack(ss)
         dump_file(S, output[0])
