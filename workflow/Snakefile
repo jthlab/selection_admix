@@ -255,6 +255,7 @@ rule analyze:
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
+    threads: 8
     run:
         datasets, snps = load_file(input[0])
         wc = wildcards
@@ -276,6 +277,7 @@ rule sample_paths:
         "results/{population}/{snp}/{stuff}/M{M}/analyze.pkl",
     output:
         "results/{population}/{snp}/{stuff}/M{M}/paths.pkl",
+    threads: 8
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -292,6 +294,7 @@ rule resample:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     output:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
+    threads: 8
     resources:
         gpus=1,
         slurm_partition="spgpu,gpu",
@@ -348,3 +351,18 @@ rule altplot:
         "results/{population}/{snp}/{stuff}/plot.pdf"
     shell:
         "cp {input} {output}"
+
+ALL_SNPS = {
+    "EAS": ["snp_4_100142302_AC", "rs174548_CG"],
+    "EUR": ["rs174548_CG", "rs4988235_AG", "rs12913832_GA", "rs16891982_GC"],
+    "SAM": ["rs5760093_AG"]
+}
+
+rule all:
+    input:
+        [
+            config["figure_path"] + f"/a2/em5/M10000/{population}_{snp}.pdf"
+            for population in ALL_SNPS
+            for snp in ALL_SNPS[population]
+        ]
+
