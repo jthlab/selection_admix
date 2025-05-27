@@ -1,5 +1,5 @@
 resources:
   - gpus=1
-cores: "8"
+cores: "48"
 config:
   - figure_path="figures"

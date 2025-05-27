@@ -1,16 +1,6 @@
-# code snippet to be included in sitecustomize.py
-# Needs Python 2.1 or later!
-import sys
-import pdb
-import traceback
-
-def info(type, value, tb):
-    traceback.print_exception(type, value, tb)
-    # ...then start the debugger in post-mortem mode
-    pdb.pm()
-
-# sys.excepthook = info
-
+import os
+# prevent jax from gobbling up all the gpu memory
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import pickle
 import numpy as np
@@ -48,22 +38,23 @@ def plot_trajectories(pop, outfile, sln, sln_samples, paths, data):
     s = sln(t)
     s_samples = jax.vmap(lambda si: si(t))(sln_samples)
 
-    low = np.quantile(s_samples, 0.05, axis=0)  # [T, K]
-    high = np.quantile(s_samples, 0.95, axis=0)
+    low, mid, high = np.quantile(s_samples, [0.05, 0.5, 0.95], axis=0)  # [T, K]
 
     fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
     for k in range(K):
-        axs[0].plot(s[:, k], color=cols[k], alpha=1)
+        # axs[0].plot(s[:, k], color=cols[k], alpha=1)
+        axs[0].plot(mid[:, k], color=cols[k], alpha=1)
         axs[0].fill_between(
             range(s.shape[0]), low[:, k], high[:, k], alpha=0.2, color=cols[k]
         )
 
+    paths = paths[:, ::-1] / 2e4
     high = np.max(paths, axis=0)
     low = np.min(paths, axis=0)
     for k in range(K):
-        axs[1].plot(np.mean(paths, axis=0)[k], color=cols[k])
+        axs[1].plot(np.mean(paths, axis=0)[:, k], color=cols[k])
         axs[1].fill_between(
-            range(paths.shape[2]), low[k], high[k], alpha=0.2, color=cols[k]
+            range(paths.shape[1]), low[:, k], high[:, k], alpha=0.2, color=cols[k]
         )
 
     a, b = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
@@ -291,7 +282,7 @@ rule sample_paths:
         data = datasets[snps.index(wildcards.snp)]
         (sln, prior), aux = load_file(input[1])
         key = jax.random.key(42)
-        paths, _, _ = sample_paths(sln, prior, data, int(wildcards.M), N_E, key)
+        paths = sample_paths(sln, prior, data, int(wildcards.M), N_E, key)[0]
         dump_file(paths, output[0])
 
 

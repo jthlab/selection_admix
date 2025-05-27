@@ -1,4 +1,9 @@
-from jax.scipy.stats import beta
-from jax import grad
+from jax import jit
+import numpy as np
+import interpax
 
-print(grad(beta.pdf, argnums=2)(0., 1., 2.))
+@jit
+def f(x, y):
+    return interpax.CubicSpline(x, y)
+
+f(np.array([0, 1, 2, 3]), np.array([0, 1, 4, 9]))

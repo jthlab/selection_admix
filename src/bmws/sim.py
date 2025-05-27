@@ -86,6 +86,8 @@ def sim_admix(
     assert afs.shape == (T + 1, K)
     obs = []
     for t, theta, (n, _) in zip(*data):
+        theta = np.array(theta, dtype=np.float64)
+        theta /= np.sum(theta, dtype=np.float64)
         k = rng.choice(K, p=theta)
         p = afs[t, k]
         d = rng.binomial(n, p)

@@ -1,10 +1,14 @@
+import timeit
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 import gnuplotlib as gp
+import interpax
 import jax
 import jax.numpy as jnp
 import jaxopt
 import numpy as np
+import optimistix as optx
 from jax import jit, vmap
 
 from .data import Dataset
@@ -12,9 +16,17 @@ from .flsa import flsa
 from .pf import backward_sample_batched, forward_filter
 
 
+@contextmanager
+def timed(msg="Elapsed"):
+    start = timeit.default_timer()
+    yield
+    end = timeit.default_timer()
+    print(f"{msg}: {end - start:.6f}s")
+
+
 @jax.tree_util.register_dataclass
 @dataclass
-class Selection:
+class SplineSelection:
     T: float = field(metadata=dict(static=True))
     s: jnp.ndarray
 
@@ -26,20 +38,37 @@ class Selection:
 
     def __call__(self, xq, derivative=0):
         assert xq.ndim == 1
-        return self.s[xq]
-
-        t = self.t
 
         def f(si):
-            return interpax.interp1d(xq, t, si, extrap=True)
+            return interpax.interp1d(xq, self.t, si, extrap=True)
 
         return vmap(f, in_axes=1, out_axes=1)(self.s)
-        # return vmap(interpax.interp1d, in_axes=(None, 0, 1), out_axes=1)(t, xq, self.s)
+
+    def roughness(self, order=2):
+        x = jnp.linspace(0, self.T, self.s.shape[0])
+        ds2 = self(x, derivative=2)
+        return jnp.trapezoid(ds2**2, x, axis=0).sum()
+
+    @classmethod
+    def default(cls, T, K):
+        s = np.zeros((5, K))
+        return cls(T=T, s=s)
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class PiecewiseSelection:
+    T: float = field(metadata=dict(static=True))
+    s: jnp.ndarray
+
+    @property
+    def t(self):
+        assert self.s.ndim == 2
+        M = len(self.s)
+        return jnp.linspace(0, self.T, M)
 
     def roughness(self):
-        x = jnp.linspace(0, self.T, self.s.shape[0])
-        ds2 = self(x, derivative=1)
-        return jnp.trapezoid(ds2**2, x, axis=0).sum()
+        return 0.0  # computed via prox
 
     def __call__(self, xq, derivative=0):
         assert self.s.ndim == 2
@@ -53,6 +82,9 @@ class Selection:
         return cls(T=T, s=s)
 
 
+Selection = SplineSelection
+
+
 def sample_paths(sln, prior, data, num_paths, N_E, key):
     td = data.t[1:] != data.t[:-1]
     t_diff = np.r_[data.t[0], data.t[1:][td]]
@@ -63,12 +95,13 @@ def sample_paths(sln, prior, data, num_paths, N_E, key):
     theta = data.theta.clip(1e-5, 1 - 1e-5)
     theta /= theta.sum(1, keepdims=True)
     # breakpoint()
-    alpha = forward_filter(
-        *map(np.array, (data.obs[:, 1], theta, sln(data.t), data.t, prior)),
-        seeds[0],
-        ll,
-        N_E,
-    )
+    with timed("forward filter"):
+        alpha = forward_filter(
+            *map(np.array, (data.obs[:, 1], theta, sln(data.t), data.t, prior)),
+            seeds[0],
+            ll,
+            N_E,
+        )
     alpha_diff = np.concatenate([alpha[1:][td], alpha[-1:]])
     paths = backward_sample_batched(alpha_diff, sln(t_diff), N_E, num_paths, seeds[1])
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
@@ -109,20 +142,21 @@ def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4
         lls = f(paths[:, :-1], paths[:, 1:])
         BOUND = 0.1
         bound_pen = jax.nn.relu(jnp.abs(s) - BOUND).sum()
-        ret = -lls.mean() + 1e3 * bound_pen + (s * s).sum()
+        ret = -lls.mean() + 1e3 * bound_pen + alpha * sln.roughness()
         return jnp.where(~jnp.isfinite(ret), jnp.inf, ret)
 
     def prox(sln, l1reg, scaling):
         prox_s = vmap(flsa, (1, None), 1)(sln.s, l1reg * scaling)
         return replace(sln, s=prox_s)
 
+    bfgs = optx.BFGS(1e-4, 1e-4)
     opt = jaxopt.ProximalGradient(obj, prox)
 
     def step(sln, paths, t):
-        with jax.debug_nans(False):
-            # return optx.minimise(obj, bfgs, sln, args=(paths, t), max_steps=None).value
-            res = opt.run(sln, hyperparams_prox=alpha, args=(paths, t))
-            return res.params
+        with jax.debug_nans(True):
+            return optx.minimise(obj, bfgs, sln, args=(paths, t), max_steps=None).value
+        # res = opt.run(sln, hyperparams_prox=alpha, args=(paths, t))
+        # return res.params
 
     # assumption: data always starts and ends with an observation (not a transition)
     # illustration: t = [5, 5, 4, 3, 2, 1, 0, 0, 0]
@@ -130,8 +164,8 @@ def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4
     NUM_PARTICLES = M
     NUM_PATHS = NUM_PARTICLES
 
-    if not __debug__:
-        step = jit(step)
+    # if not __debug__:
+    #     step = jit(step)
 
     key = jax.random.PRNGKey(seed)
     key, subkey = jax.random.split(key)
@@ -174,7 +208,7 @@ def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4
                 unset="grid",
             )
         print(lls)
+        print(f"roughness: {sln.roughness(0)} {sln.roughness(1)} {sln.roughness(2)}")
         ret.append((sln, prior))
-        breakpoint()
 
     return (sln, prior), ret

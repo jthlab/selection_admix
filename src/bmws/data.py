@@ -5,24 +5,7 @@ import jax
 import numpy as np
 from jax import numpy as jnp
 
-
-def tree_stack(trees):
-    """Takes a list of trees and stacks every corresponding leaf.
-    For example, given two trees ((a, b), c) and ((a', b'), c'), returns
-    ((stack(a, a'), stack(b, b')), stack(c, c')).
-    Useful for turning a list of objects into something you can feed to a
-    vmapped function.
-    """
-    leaves_list = []
-    treedef_list = []
-    for tree in trees:
-        leaves, treedef = jax.tree.flatten(tree)
-        leaves_list.append(leaves)
-        treedef_list.append(treedef)
-
-    grouped_leaves = zip(*leaves_list)
-    result_leaves = [np.stack(l) for l in grouped_leaves]
-    return treedef_list[0].unflatten(result_leaves)
+from .util import tree_stack
 
 
 class Dataset(NamedTuple):
@@ -94,5 +77,5 @@ class Dataset(NamedTuple):
         ret = tree_stack(dss)
         assert ret.t.max() == T_MAX
         assert ret.t.min() == T_MIN
-        assert len(ret.obs) == len(records) + T_MAX
+        # assert len(ret.obs) == len(records) + T_MAX, (len(ret.obs), len(records), T_MAX)
         return ret

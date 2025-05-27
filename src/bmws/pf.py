@@ -4,8 +4,8 @@ import math
 
 import numba
 import numpy as np
-from numba import config, cuda, njit, prange, vectorize
-from numba.cuda.random import create_xoroshiro128p_states
+from numba import config, cuda, njit, objmode, prange, vectorize
+from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 
 config.CUDA_ENABLE_PYNVJITLINK = 1
 
@@ -33,6 +33,43 @@ def logsumexp(a):
     if np.isneginf(a_max):
         return a_max
     return a_max + np.log(np.sum(np.exp(a - a_max)))
+
+
+@cuda.jit
+def gumbel_max_resample_kernel(log_weights, rng_states, inds):
+    """Each thread samples one index via Gumbel-max over log_weights."""
+    tid = cuda.grid(1)
+    P = log_weights.shape[0]
+
+    if tid < P:
+        max_val = float("-inf")
+        max_idx = -1
+        for j in range(P):
+            u = xoroshiro128p_uniform_float32(rng_states, tid)
+            g = -math.log(-math.log(u))  # Gumbel(0,1)
+            val = log_weights[j] + g
+            if val > max_val:
+                max_val = val
+                max_idx = j
+        inds[tid] = max_idx
+
+
+def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
+    P = log_weights.shape[0]
+    threads_per_block = 64
+    blocks = (P + threads_per_block - 1) // threads_per_block
+
+    # Allocate on device
+    d_log_weights = cuda.to_device(log_weights.astype(np.float32))
+    d_inds = cuda.device_array(P, dtype=np.int32)
+    rng_states = create_xoroshiro128p_states(P, seed=seed)
+
+    # Launch
+    gumbel_max_resample_kernel[blocks, threads_per_block](
+        d_log_weights, rng_states, d_inds
+    )
+
+    return d_inds.copy_to_host()
 
 
 @njit(parallel=True)
@@ -93,23 +130,18 @@ def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
                 print(log_theta)
                 print(obs[i])
                 assert False
-            for j in prange(P):
-                g = np.random.gumbel(0.0, 1.0, P)
-                inds[j] = np.argmax(g + log_weights)
+            seed1 = np.random.randint(1, 2**32 - 1)
+            if True:
+                with objmode(temp_inds="int32[:]"):
+                    temp_inds = gumbel_max_resample(log_weights, seed1)
+                inds[:] = temp_inds
+            else:
+                for j in prange(P):
+                    g = np.random.gumbel(0.0, 1.0, P)
+                    inds[j] = np.argmax(g + log_weights)
             particles = particles[inds]
-            # if i >= 199:
-            #     breakpoint()
-            # diversity = len(np.unique(inds))
-            # other_inds = np.random.choice(p, p=np.exp(log_weights - lse), replace=True, size=p)
-            # other_diversity = len(np.unique(other_inds))
-        # print("i:{} trans:{} theta:{} t:{} obs:{} mean_p:{} ll:{}".format(
-        #     i, tr,
-        #     thetas[i],
-        #     t[i], obs[i], np.mean(expit(particles), 0),
-        #     ll,
-        # ))
+        # Store particles
         alpha[i] = particles
-        # number of unique particles
     return alpha
 
 
@@ -174,7 +206,7 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
     shared_ret = cuda.local.array(shape=(MAX_N, MAX_D), dtype=numba.int32)
 
     # Step 0
-    j = int(cuda.random.xoroshiro128p_uniform_float32(rng_states, b) * P)
+    j = int(xoroshiro128p_uniform_float32(rng_states, b) * P)
     for k in range(D):
         shared_ret[0, k] = alpha[N - 1, j, k]
 
@@ -189,9 +221,7 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
                 p0 = alpha[N - 1 - i, j, k] / 2 / N_E
                 p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
                 log_w += binom_logpmf_gpu(n1, 2 * N_E, p_prime)
-            g = -math.log(
-                -math.log(cuda.random.xoroshiro128p_uniform_float32(rng_states, b))
-            )
+            g = -math.log(-math.log(xoroshiro128p_uniform_float32(rng_states, b)))
             score = log_w + g
             if score > max_score:
                 max_score = score
