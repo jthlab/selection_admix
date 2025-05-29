@@ -36,12 +36,12 @@ def logsumexp(a):
 
 
 @cuda.jit
-def gumbel_max_resample_kernel(log_weights, rng_states, inds):
+def gumbel_max_resample_kernel(log_weights, rng_states, inds, frac):
     """Each thread samples one index via Gumbel-max over log_weights."""
     tid = cuda.grid(1)
     P = log_weights.shape[0]
 
-    if tid < P:
+    if tid < frac * P:
         max_val = float("-inf")
         max_idx = -1
         for j in range(P):
@@ -54,95 +54,114 @@ def gumbel_max_resample_kernel(log_weights, rng_states, inds):
         inds[tid] = max_idx
 
 
-def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
+def gumbel_max_resample(log_weights: np.ndarray, seed: int, frac: float) -> np.ndarray:
     P = log_weights.shape[0]
     threads_per_block = 64
-    blocks = (P + threads_per_block - 1) // threads_per_block
+    blocks = (int(frac * P) + threads_per_block - 1) // threads_per_block
 
     # Allocate on device
     d_log_weights = cuda.to_device(log_weights.astype(np.float32))
-    d_inds = cuda.device_array(P, dtype=np.int32)
+    d_inds = cuda.to_device(np.arange(P, dtype=np.int32))
     rng_states = create_xoroshiro128p_states(P, seed=seed)
 
     # Launch
     gumbel_max_resample_kernel[blocks, threads_per_block](
-        d_log_weights, rng_states, d_inds
+        d_log_weights, rng_states, d_inds, frac
     )
 
     return d_inds.copy_to_host()
 
 
-@njit(parallel=True)
-def forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E):
+@njit
+def resample(particles, log_weights, ll, frac):
+    # resample particles according to weights
+    (P,) = log_weights.shape
+    lse = logsumexp(log_weights)
+    ll[0] += lse - np.log(P)
+    seed = np.random.randint(1, 2**32 - 1)
+    with objmode(inds="int32[:]"):
+        inds = gumbel_max_resample(log_weights, seed, frac)
+    particles[:] = particles[inds]
+    log_weights[:] = -np.log(P)
+
+
+@njit
+def log_obs_likelihood(
+    x: np.ndarray, obs: np.ndarray, theta: np.ndarray, N_E: int
+) -> float:
+    """Compute log p(obs | x, theta)"""
+    p = x / (2 * N_E)
+    p_safe = np.where((x == 0) | (x == 2 * N_E), 0.5, p)
+
+    log_p = obs * np.log(p_safe) + (1 - obs) * np.log1p(-p_safe)
+    log_p = np.where((obs == 0) & (x == 0), 0.0, log_p)
+    log_p = np.where((obs == 1) & (x == 0), -np.inf, log_p)
+    log_p = np.where((obs == 0) & (x == 2 * N_E), -np.inf, log_p)
+    log_p = np.where((obs == 1) & (x == 2 * N_E), 0.0, log_p)
+
+    return logsumexp(log_p + np.log(theta))
+
+
+@njit(parallel=True, nogil=True)
+def forward_filter(
+    obs, thetas, s, t, particles, log_weights, alpha, gamma, ll, N_E, seed
+):
     """
     Forward algorithm for the particle filter.
     obs: observations [T], 0/1 array
     thetas: [T, D] admixture loadings over D populations (rows sum to 1)
     s: selection matrix [T, D]
     t: [T] time indices
-    pi: initial state distribution
+    pi: initial state distribution: particles, log_weights
     """
     np.random.seed(seed)
     N = len(obs)
-    P, D = pi.shape
-    alpha = np.full((N, P, D), -1, dtype=np.int32)
-    particles = pi
-    log_weights = np.empty(P)
-    inds = np.empty(P, dtype=np.int32)
-    ll_out[0] = 0.0
-
-    # Recursion
+    P, D = particles.shape
+    ll[0] = 0.0
+    # forward filtering recursion
+    ell = 0
     for i in range(N):
         tr = False
-        ll = np.nan
         if (i > 0) and (t[i] != t[i - 1]):
-            # Resample particles under transition
+            # wright fisher mating
+            resample(particles, log_weights, ll, 1.0)
+            alpha[ell] = particles
+            gamma[ell] = log_weights
+            ell += 1
             for j in prange(P):
                 for k in range(D):
-                    p = particles[j, k] / 2 / N_E
-                    p_prime = (1 + s[t[i], k] / 2) * p / (1 + s[t[i], k] / 2 * p)
+                    p = float(particles[j, k]) / 2 / N_E
+                    s_tk = s[t[i], k]
+                    p_prime = (1 + s_tk / 2) * p / (1 + s_tk / 2 * p)
                     particles[j, k] = random_binomial_large_N(2 * N_E, p_prime)
-            tr = True
+            # breakpoint()
+            # pass  # 1
         else:
             # observation
             log_theta = np.log(thetas[i])
             for j in prange(P):
                 n = particles[j]
-                p = n / 2 / N_E
-                # prevent runtime warnings
-                p_safe = np.where((n == 0) | (n == 2 * N_E), 0.5, p)
-                log_p_b = obs[i] * np.log(p_safe) + (1 - obs[i]) * np.log1p(-p_safe)
-                # Handle edge cases for log_p_b
-                log_p_b = np.where((obs[i] == 0) & (n == 0), 0.0, log_p_b)
-                log_p_b = np.where((obs[i] == 1) & (n == 0), -np.inf, log_p_b)
-                log_p_b = np.where((obs[i] == 0) & (n == 2 * N_E), -np.inf, log_p_b)
-                log_p_b = np.where((obs[i] == 1) & (n == 2 * N_E), 0.0, log_p_b)
-                log_weights[j] = logsumexp(log_p_b + log_theta)
-            # resample particles according to weights
-            lse = logsumexp(log_weights)
-            ll = lse - np.log(P)
-            ll_out[0] += ll
-            if ~np.isfinite(ll_out[0]):
-                print(ll)
-                print(particles)
-                print(lse)
-                print(log_weights)
-                print(log_theta)
-                print(obs[i])
-                assert False
-            seed1 = np.random.randint(1, 2**32 - 1)
-            if True:
-                with objmode(temp_inds="int32[:]"):
-                    temp_inds = gumbel_max_resample(log_weights, seed1)
-                inds[:] = temp_inds
-            else:
-                for j in prange(P):
-                    g = np.random.gumbel(0.0, 1.0, P)
-                    inds[j] = np.argmax(g + log_weights)
-            particles = particles[inds]
-        # Store particles
-        alpha[i] = particles
-    return alpha
+                log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
+                log_weights[j] += log_p_x
+                # rejuvenation
+                for k in range(D):
+                    if particles[j, k] >= 100 and particles[j, k] <= 2 * N_E - 100:
+                        x = np.random.randint(-100, 101)
+                        proposal = np.copy(particles[j])
+                        proposal[k] += x
+                        log_p_x_1 = log_obs_likelihood(proposal, obs[i], thetas[i], N_E)
+                        mh = log_p_x_1 - log_p_x
+                        if np.log(np.random.rand()) < mh:
+                            particles[j, k] = proposal[k]
+                            log_p_x = log_p_x_1
+            # breakpoint()
+            # pass  # 2
+    # end loop
+    # final resampling step
+    # breakpoint()
+    resample(particles, log_weights, ll, 0.5)
+    alpha[ell] = particles
+    gamma[ell] = log_weights
 
 
 @njit(nogil=True)
@@ -195,8 +214,8 @@ def binom_logpmf_gpu(x, n, p):
     )
 
 
-@cuda.jit
-def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
+@cuda.jit(cache=True)
+def backward_sample_kernel(alpha, gamma, s, N_E, ret, rng_states):
     b = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     B = ret.shape[0]
     if b >= B:
@@ -206,15 +225,23 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
     shared_ret = cuda.local.array(shape=(MAX_N, MAX_D), dtype=numba.int32)
 
     # Step 0
-    j = int(xoroshiro128p_uniform_float32(rng_states, b) * P)
+    max_score = float("-inf")
+    argmax_j = -1
+    for j in range(P):
+        g = -math.log(-math.log(xoroshiro128p_uniform_float32(rng_states, b)))
+        score = gamma[N - 1, j] + g
+        if score > max_score:
+            max_score = score
+            argmax_j = j
     for k in range(D):
-        shared_ret[0, k] = alpha[N - 1, j, k]
+        shared_ret[0, k] = alpha[N - 1, argmax_j, k]
 
+    # steps 1, ..., N
     for i in range(1, N):
         max_score = float("-inf")
         argmax_j = -1
         for j in range(P):
-            log_w = 0.0
+            log_w = gamma[N - 1 - i, j]
             for k in range(D):
                 s_t = s[N - i - 1, k]
                 n1 = shared_ret[i - 1, k]
@@ -235,7 +262,7 @@ def backward_sample_kernel(alpha, s, N_E, ret, rng_states):
 
 
 def backward_sample_batched(
-    alpha: np.ndarray, s: np.ndarray, N_E: int, B: int, seed: int = 0
+    alpha, gamma, s: np.ndarray, N_E: int, B: int, seed: int = 0
 ) -> np.ndarray:
     """
     Sample B backward trajectories using the CUDA kernel.
@@ -258,6 +285,7 @@ def backward_sample_batched(
 
     # Allocate device memory
     alpha_d = cuda.to_device(alpha.astype(np.int32))
+    gamma_d = cuda.to_device(gamma.astype(np.float32))
     s_d = cuda.to_device(s.astype(np.float32))
     ret_d = cuda.device_array((B, N, D), dtype=np.int32)
 
@@ -266,7 +294,7 @@ def backward_sample_batched(
 
     # Launch
     backward_sample_kernel[blocks, threads_per_block](
-        alpha_d, s_d, N_E, ret_d, rng_states
+        alpha_d, gamma_d, s_d, N_E, ret_d, rng_states
     )
 
     return ret_d.copy_to_host()

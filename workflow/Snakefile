@@ -8,6 +8,7 @@ import bmws.data
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import statsmodels.api as sm
 
 from bmws.infer import Selection, em, sample_paths
 from bmws.util import tree_stack
@@ -113,7 +114,6 @@ def run_analysis(data, sln0=None, alpha=1e4, em_iterations=50, M=10_000):
     if sln0 is None:
         sln0 = Selection.default(T=data.T, K=data.K)
     return em(sln0=sln0, data=data, alpha=alpha, em_iterations=em_iterations, M=M, seed=42, N_E=N_E)
-
 
 def bootstrap(sln, data, prior, rng, em_iterations, alpha, M):
     t = data.t
@@ -244,9 +244,36 @@ def _params(wc):
     return alpha, em_iterations, M
 
 
+rule prior:
+    input:
+        "results/{population}/data.pkl",
+    output:
+        "results/{population}/{snp}/prior.pkl"
+    localrule: True
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        datasets, snps = load_file(input[0])
+        wc = wildcards
+        try:
+            data = datasets[snps.index(wc.snp)]
+        except ValueError:
+            raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
+        x, y = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
+            int(x[1]) for x, y in zip(data.obs, data.t) if x[0] > 0
+        ]
+        # logistic regression using statsmodels
+        X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
+        model = sm.Logit(y, X)
+        result = model.fit(disp=0)  # disp=0 to suppress output
+        # predict at time x=T
+        p_T = result.predict(np.array([[1., data.T]]))
+        dump_file(p_T, output[0])
+
+
 rule analyze:
     input:
         "results/{population}/data.pkl",
+        "results/{population}/{snp}/prior.pkl",
     output:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl",
     resources:
@@ -258,6 +285,7 @@ rule analyze:
     threads: 8
     run:
         datasets, snps = load_file(input[0])
+        p_T = load_file(input[1])
         wc = wildcards
         M = int(wc.M)
         try:
@@ -267,7 +295,7 @@ rule analyze:
         Ne = 1e4
         alpha, em_iterations, M = _params(wildcards)
         sln0 = Selection.default(T=data.T, K=data.K)
-        res = em(sln0, data, alpha, em_iterations, M, seed=42)
+        res = em(sln0, data, alpha, em_iterations, M, seed=42, p_T=p_T)
         dump_file(res, output[0])
 
 

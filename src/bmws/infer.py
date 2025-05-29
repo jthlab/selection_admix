@@ -1,4 +1,5 @@
 import timeit
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
@@ -88,28 +89,37 @@ Selection = SplineSelection
 def sample_paths(sln, prior, data, num_paths, N_E, key):
     td = data.t[1:] != data.t[:-1]
     t_diff = np.r_[data.t[0], data.t[1:][td]]
+    particles, log_weights = prior
+    P, K = particles.shape
+    T = len(t_diff)
+    alpha = np.zeros((T, P, K), dtype=np.int32)
+    gamma = np.zeros((T, P), dtype=np.float32)
     seeds = list(map(int, jax.random.randint(key, (2,), 0, 2**31 - 1)))
     # have to convert to np.array because of buffer protocol stuff
-    print(prior.mean(0) / 2 / N_E)
     ll = np.zeros(1)
     theta = data.theta.clip(1e-5, 1 - 1e-5)
     theta /= theta.sum(1, keepdims=True)
-    # breakpoint()
     with timed("forward filter"):
-        alpha = forward_filter(
-            *map(np.array, (data.obs[:, 1], theta, sln(data.t), data.t, prior)),
-            seeds[0],
+        forward_filter(
+            *map(
+                np.array,
+                (data.obs[:, 1], theta, sln(data.t), data.t, particles, log_weights),
+            ),
+            alpha,
+            gamma,
             ll,
             N_E,
+            seeds[0],
         )
-    alpha_diff = np.concatenate([alpha[1:][td], alpha[-1:]])
-    paths = backward_sample_batched(alpha_diff, sln(t_diff), N_E, num_paths, seeds[1])
+    paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, num_paths, seeds[1])
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
-    return jnp.array(paths)[:, ::-1], t_diff, ll, alpha_diff
+    return jnp.array(paths)[:, ::-1], t_diff, ll
 
 
-def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4):
+def em(
+    sln0: Selection, data: Dataset, alpha, em_iterations, M, p_T=None, seed=42, N_E=1e4
+):
     def binom_logpmf(n, N, p):
         p0 = jnp.isclose(p, 0.0)
         p1 = jnp.isclose(p, 1.0)
@@ -170,25 +180,53 @@ def em(sln0: Selection, data: Dataset, alpha, em_iterations, M, seed=42, N_E=1e4
     key = jax.random.PRNGKey(seed)
     key, subkey = jax.random.split(key)
     sln = sln0
-    prior = (
-        jax.random.beta(subkey, 1.0, 1000.0, (NUM_PARTICLES, data.K)) * 2 * N_E
-    ).astype(jnp.int32)
+    if p_T is None:
+        # uniform
+        a = b = 1.0
+    else:
+        a = 1000.0 * p_T
+        b = 1000.0 * (1 - p_T)
+
+    # beta conditional segregation
+    c = Counter()
+    prior = jnp.ones((0, data.K), dtype=np.int32)
+    while len(c) < NUM_PARTICLES:
+        key, subkey = jax.random.split(key)
+        # sample from beta distribution
+        sample = jax.random.beta(
+            subkey,
+            a,
+            b,
+            (
+                NUM_PARTICLES,
+                data.K,
+            ),
+        )
+        sample = (2 * N_E * sample).astype(np.int32)
+        sample = sample[(sample > 0).all(1) & (sample < 2 * N_E).all(1)]
+        c.update(Counter(map(tuple, sample.tolist())))
+        prior = jnp.concatenate([prior, sample], axis=0)
+        # scale to 2 * N_E
+    particles, counts = [
+        jnp.array(x, dtype=jnp.int32) for x in zip(*c.most_common(NUM_PARTICLES))
+    ]
+    log_weights = jnp.log(counts) - np.log(counts.sum())
+    prior = (particles, log_weights)
 
     lls = []
     last_lls = None
-
     ret = []
-
     for i in range(em_iterations):
-        assert prior.shape == (NUM_PARTICLES, data.K)
+        assert prior[0].shape == (NUM_PARTICLES, data.K)
         key, subkey = jax.random.split(key)
-        paths, t_diff, ll, ffd = sample_paths(
-            sln, prior, data, NUM_PARTICLES, N_E, subkey
-        )
+        paths, t_diff, ll = sample_paths(sln, prior, data, NUM_PARTICLES, N_E, subkey)
         lls = np.append(lls, ll)
         # since time runs backwards (see above) paths[:, 0]
         # is the distribution at the most ancient time point
-        prior = paths[:, 0]
+        prior = (
+            paths[:, 0],
+            np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
+        )
         p = paths.mean(0) / 2 / N_E
         gp.plot(
             *[(t_diff[::-1], y[::-1]) for y in p.T],
