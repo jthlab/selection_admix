@@ -159,7 +159,7 @@ def forward_filter(
     # end loop
     # final resampling step
     # breakpoint()
-    resample(particles, log_weights, ll, 0.5)
+    resample(particles, log_weights, ll, 1.0)
     alpha[ell] = particles
     gamma[ell] = log_weights
 
@@ -195,14 +195,14 @@ def binom_logpmf_gpu(x, n, p):
     n: number of trials
     p: probability of success
     """
-    if p <= 0 or p >= 1:
-        return float("-inf")
     if x < 0 or x > n:
         return float("-inf")
     if p == 0.0:
         return 0.0 if x == 0 else float("-inf")
     if p == 1.0:
         return 0.0 if x == n else float("-inf")
+    if p < 0 or p > 1:
+        return float("-inf")
     log_p = math.log(p)
     log_q = math.log1p(-p)
     return (
