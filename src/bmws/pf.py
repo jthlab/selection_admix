@@ -36,12 +36,12 @@ def logsumexp(a):
 
 
 @cuda.jit
-def gumbel_max_resample_kernel(log_weights, rng_states, inds, frac):
+def gumbel_max_resample_kernel(log_weights, rng_states, inds):
     """Each thread samples one index via Gumbel-max over log_weights."""
     tid = cuda.grid(1)
     P = log_weights.shape[0]
 
-    if tid < frac * P:
+    if tid < P:
         max_val = float("-inf")
         max_idx = -1
         for j in range(P):
@@ -54,10 +54,10 @@ def gumbel_max_resample_kernel(log_weights, rng_states, inds, frac):
         inds[tid] = max_idx
 
 
-def gumbel_max_resample(log_weights: np.ndarray, seed: int, frac: float) -> np.ndarray:
+def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
     P = log_weights.shape[0]
     threads_per_block = 64
-    blocks = (int(frac * P) + threads_per_block - 1) // threads_per_block
+    blocks = (P + threads_per_block - 1) // threads_per_block
 
     # Allocate on device
     d_log_weights = cuda.to_device(log_weights.astype(np.float32))
@@ -66,21 +66,21 @@ def gumbel_max_resample(log_weights: np.ndarray, seed: int, frac: float) -> np.n
 
     # Launch
     gumbel_max_resample_kernel[blocks, threads_per_block](
-        d_log_weights, rng_states, d_inds, frac
+        d_log_weights, rng_states, d_inds
     )
 
     return d_inds.copy_to_host()
 
 
 @njit
-def resample(particles, log_weights, ll, frac):
+def resample(particles, log_weights, ll):
     # resample particles according to weights
     (P,) = log_weights.shape
     lse = logsumexp(log_weights)
     ll[0] += lse - np.log(P)
     seed = np.random.randint(1, 2**32 - 1)
     with objmode(inds="int32[:]"):
-        inds = gumbel_max_resample(log_weights, seed, frac)
+        inds = gumbel_max_resample(log_weights, seed)
     particles[:] = particles[inds]
     log_weights[:] = -np.log(P)
 
@@ -102,9 +102,9 @@ def log_obs_likelihood(
     return logsumexp(log_p + np.log(theta))
 
 
-@njit(parallel=True, nogil=True)
+# @njit(parallel=True, nogil=True)
 def forward_filter(
-    obs, thetas, s, t, particles, log_weights, alpha, gamma, ll, N_E, seed
+    obs, thetas, s, t, particles, log_weights, alpha, gamma, ll, N_E, seed, fixed_paths
 ):
     """
     Forward algorithm for the particle filter.
@@ -117,6 +117,9 @@ def forward_filter(
     np.random.seed(seed)
     N = len(obs)
     P, D = particles.shape
+    F = len(fixed_paths)
+    assert F <= P
+    assert fixed_paths.shape[2] == D
     ll[0] = 0.0
     # forward filtering recursion
     ell = 0
@@ -124,11 +127,13 @@ def forward_filter(
         tr = False
         if (i > 0) and (t[i] != t[i - 1]):
             # wright fisher mating
-            resample(particles, log_weights, ll, 1.0)
+            resample(particles, log_weights, ll)
+            if F > 0:
+                particles[-F:, :] = fixed_paths[:, ell, :]
             alpha[ell] = particles
             gamma[ell] = log_weights
             ell += 1
-            for j in prange(P):
+            for j in prange(P - F):
                 for k in range(D):
                     p = float(particles[j, k]) / 2 / N_E
                     s_tk = s[t[i], k]
@@ -143,23 +148,28 @@ def forward_filter(
                 n = particles[j]
                 log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
                 log_weights[j] += log_p_x
-                # rejuvenation
-                for k in range(D):
-                    if particles[j, k] >= 100 and particles[j, k] <= 2 * N_E - 100:
-                        x = np.random.randint(-100, 101)
-                        proposal = np.copy(particles[j])
-                        proposal[k] += x
-                        log_p_x_1 = log_obs_likelihood(proposal, obs[i], thetas[i], N_E)
-                        mh = log_p_x_1 - log_p_x
-                        if np.log(np.random.rand()) < mh:
-                            particles[j, k] = proposal[k]
-                            log_p_x = log_p_x_1
+                a = 100
+                if j < P - F:
+                    for k in range(D):
+                        if particles[j, k] >= a and particles[j, k] <= 2 * N_E - a:
+                            x = np.random.randint(-a, a + 1)
+                            proposal = np.copy(particles[j])
+                            proposal[k] += x
+                            log_p_x_1 = log_obs_likelihood(
+                                proposal, obs[i], thetas[i], N_E
+                            )
+                            mh = log_p_x_1 - log_p_x
+                            if np.log(np.random.rand()) < mh:
+                                particles[j, k] = proposal[k]
+                                log_p_x = log_p_x_1
             # breakpoint()
             # pass  # 2
     # end loop
     # final resampling step
     # breakpoint()
-    resample(particles, log_weights, ll, 1.0)
+    resample(particles, log_weights, ll)
+    if F > 0:
+        particles[-F:, :] = fixed_paths[:, ell, :]
     alpha[ell] = particles
     gamma[ell] = log_weights
 

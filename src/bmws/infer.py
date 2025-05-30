@@ -87,6 +87,11 @@ Selection = SplineSelection
 
 
 def sample_paths(sln, prior, data, num_paths, N_E, key):
+    def get_seed():
+        nonlocal key
+        key, subkey = jax.random.split(key)
+        return int(jax.random.randint(subkey, (), 0, 2**31 - 1))
+
     td = data.t[1:] != data.t[:-1]
     t_diff = np.r_[data.t[0], data.t[1:][td]]
     particles, log_weights = prior
@@ -94,12 +99,13 @@ def sample_paths(sln, prior, data, num_paths, N_E, key):
     T = len(t_diff)
     alpha = np.zeros((T, P, K), dtype=np.int32)
     gamma = np.zeros((T, P), dtype=np.float32)
-    seeds = list(map(int, jax.random.randint(key, (2,), 0, 2**31 - 1)))
+    fixed_paths = np.empty((0, T, K))
     # have to convert to np.array because of buffer protocol stuff
     ll = np.zeros(1)
     theta = data.theta.clip(1e-5, 1 - 1e-5)
     theta /= theta.sum(1, keepdims=True)
-    with timed("forward filter"):
+    for i in range(5):
+        # particle gibbs
         forward_filter(
             *map(
                 np.array,
@@ -109,9 +115,15 @@ def sample_paths(sln, prior, data, num_paths, N_E, key):
             gamma,
             ll,
             N_E,
-            seeds[0],
+            get_seed(),
+            fixed_paths,
         )
-    paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, num_paths, seeds[1])
+        paths = backward_sample_batched(
+            alpha, gamma, sln(t_diff), N_E, num_paths, get_seed()
+        )
+        particles = paths[:, -1]  # particles at t=0
+        fixed_paths = paths[:1, ::-1]
+        print(ll, paths.mean(0)[:2])
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
     return jnp.array(paths)[:, ::-1], t_diff, ll
