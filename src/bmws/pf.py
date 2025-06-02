@@ -205,7 +205,7 @@ def forward_filter(
                 log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
                 log_weights[j] += log_p_x
                 a = 1000
-                if j < P - F:
+                if False and j < P - F:
                     for k in range(D):
                         if particles[j, k] >= a and particles[j, k] <= 2 * N_E - a:
                             x = np.random.randint(-a, a + 1)
