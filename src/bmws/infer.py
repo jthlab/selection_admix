@@ -41,14 +41,16 @@ class SplineSelection:
         assert xq.ndim == 1
 
         def f(si):
-            return interpax.interp1d(xq, self.t, si, extrap=True)
+            return interpax.interp1d(xq, self.t, si, extrap=True, derivative=derivative)
 
         return vmap(f, in_axes=1, out_axes=1)(self.s)
 
     def roughness(self, order=2):
-        x = jnp.linspace(0, self.T, self.s.shape[0])
-        ds2 = self(x, derivative=2)
-        return jnp.trapezoid(ds2**2, x, axis=0).sum()
+        x = jnp.arange(0, self.T)
+        y = self(x)
+        return jnp.sum(jnp.diff(y, 0) ** 2)
+        # ds2 = self(x, derivative=2)
+        # return jnp.trapezoid(ds2**2, x, axis=0).sum()
 
     @classmethod
     def default(cls, T, K):
