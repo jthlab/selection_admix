@@ -104,7 +104,7 @@ def sample_paths(sln, prior, data, num_paths, N_E, key):
     ll = np.zeros(1)
     theta = data.theta.clip(1e-5, 1 - 1e-5)
     theta /= theta.sum(1, keepdims=True)
-    for i in range(5):
+    for i in range(2):
         # particle gibbs
         forward_filter(
             *map(

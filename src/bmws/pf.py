@@ -72,16 +72,65 @@ def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
     return d_inds.copy_to_host()
 
 
-@njit
+@njit(parallel=True)
 def resample(particles, log_weights, ll):
     # resample particles according to weights
     (P,) = log_weights.shape
     lse = logsumexp(log_weights)
     ll[0] += lse - np.log(P)
-    seed = np.random.randint(1, 2**32 - 1)
-    with objmode(inds="int32[:]"):
-        inds = gumbel_max_resample(log_weights, seed)
-    particles[:] = particles[inds]
+
+    # seed = np.random.randint(1, 2**32 - 1)
+    # with objmode(inds="int32[:]"):
+    #     inds = gumbel_max_resample(log_weights, seed)
+    # particles[:] = particles[inds]
+    # log_weights[:] = -np.log(P)
+    # return
+
+    weights = np.exp(log_weights - lse)
+    # residual resampling
+    residual_indices = np.empty(P, dtype=np.int32)
+    new_particles = np.empty_like(particles)
+    num_copies = np.floor(P * weights).astype(
+        np.int32
+    )  # Number of deterministic copies for each particle
+    # Create the deterministic copies
+    k = 0  # Index for the new_indices and new_particles array
+    for i in range(P):
+        for _ in range(num_copies[i]):
+            if k < P:  # Ensure we don't exceed the total number of particles
+                new_particles[k] = particles[i]
+                k += 1
+            else:
+                # This should ideally not happen if weights are normalized
+                # and sum to 1, but it's a safeguard.
+                break
+        if k >= P:
+            break
+    S = P - k  # Number of particles left to resample stochastically
+    if S > 0:  # stochastically resample small weight particles
+        # Calculate the residual weights
+        residual_weights = (P * weights) - num_copies
+        residual_weights /= np.sum(residual_weights)  # Normalize residual weights
+
+        # Perform multinomial resampling on the residuals
+        # This draws `num_to_resample_stochastic` samples based on `residual_weights`
+        cs = np.cumsum(residual_weights)
+        # Ensure the last element is exactly 1.0 to avoid floating point issues
+        cs[-1] = 1.0
+
+        # Generate random numbers for selecting from residuals
+        u = np.random.rand(S)
+
+        # Find corresponding indices using searchsorted (efficient way to do inverse CDF)
+        for s in prange(S):
+            residual_indices[s] = np.searchsorted(cs, u[s], side="left")
+
+        new_particles[-S:] = particles[
+            residual_indices[:S]
+        ]  # Fill the rest of new_particles with stochastic samples
+
+    # Update particles and log_weights
+    particles[:] = new_particles
     log_weights[:] = -np.log(P)
 
 
@@ -102,7 +151,7 @@ def log_obs_likelihood(
     return logsumexp(log_p + np.log(theta))
 
 
-# @njit(parallel=True, nogil=True)
+@njit(parallel=True, nogil=True)
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, alpha, gamma, ll, N_E, seed, fixed_paths
 ):
@@ -123,11 +172,18 @@ def forward_filter(
     ll[0] = 0.0
     # forward filtering recursion
     ell = 0
+    weights_are_uniform = False
     for i in range(N):
         tr = False
         if (i > 0) and (t[i] != t[i - 1]):
             # wright fisher mating
-            resample(particles, log_weights, ll)
+            if weights_are_uniform:
+                # sample P integers from [0, P) with replacement
+                inds = np.random.randint(0, P, P)
+                particles = particles[inds]
+            else:
+                resample(particles, log_weights, ll)
+                weights_are_uniform = True
             if F > 0:
                 particles[-F:, :] = fixed_paths[:, ell, :]
             alpha[ell] = particles
@@ -148,7 +204,7 @@ def forward_filter(
                 n = particles[j]
                 log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
                 log_weights[j] += log_p_x
-                a = 100
+                a = 1000
                 if j < P - F:
                     for k in range(D):
                         if particles[j, k] >= a and particles[j, k] <= 2 * N_E - a:
@@ -162,6 +218,7 @@ def forward_filter(
                             if np.log(np.random.rand()) < mh:
                                 particles[j, k] = proposal[k]
                                 log_p_x = log_p_x_1
+            weights_are_uniform = False
             # breakpoint()
             # pass  # 2
     # end loop
