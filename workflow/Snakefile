@@ -58,10 +58,10 @@ def plot_trajectories(pop, outfile, sln, sln_samples, paths, data):
             range(paths.shape[1]), low[:, k], high[:, k], alpha=0.2, color=cols[k]
         )
 
-    a, b = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
-        int(x[1]) for x, y in zip(data.obs, data.t) if x[0] > 0
-    ]
-    sns.regplot(x=a, y=b, logistic=True, ax=axs[2], color="black")
+    for i in range(K):
+        a = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
+        b = [theta[i] * x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
+        sns.regplot(x=a, y=b, logistic=True, ax=axs[2], color=cols[i])
 
     axs[0].set(xlabel="Generations before present", ylabel="Selection coefficient")
     axs[1].set(xlabel="Generations before present", ylabel="Allele frequency")
@@ -187,25 +187,6 @@ wildcard_constraints:
     snp=r"\w+",
 
 
-# def input_for_all(wc):
-#     lst = []
-#     for pop in ["EAS", "EUR", "SAM", "SAS", "AFR"]:
-#         counts = pd.read_csv("data/" + pop.lower() + "_snp_acs.raw", sep="\t")
-#         snps = list(counts.columns)[6:]
-#         lst.extend([(pop, s) for s in snps])
-# 
-#     return [
-#         f"results/{pop}/{snp}/a4.5/b1/em10/resample_{i}.pkl"
-#         for pop, snp in lst
-#         for i in range(10)
-#     ]
-# 
-# 
-# rule all:
-#     input:
-#         input_for_all,
-# 
-
 rule read_data_test:
     output:
         "results/TEST/data.pkl",
@@ -278,7 +259,7 @@ rule analyze:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl",
     resources:
         gpus=1,
-        runtime=60,
+        runtime=720,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -308,7 +289,7 @@ rule sample_paths:
     threads: 8
     resources:
         gpus=1,
-        runtime=60,
+        runtime=720,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -331,7 +312,7 @@ rule resample:
     threads: 8
     resources:
         gpus=1,
-        runtime=60,
+        runtime=720,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -396,7 +377,7 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a2/em5/M10000/{population}_{snp}.pdf"
+            config["figure_path"] + f"/a2/em10/M2500/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
         ]
