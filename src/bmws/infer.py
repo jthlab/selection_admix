@@ -41,16 +41,15 @@ class SplineSelection:
         assert xq.ndim == 1
 
         def f(si):
-            return interpax.interp1d(xq, self.t, si, extrap=True, derivative=derivative)
+            return interpax.interp1d(xq, self.t, si, extrap=True)
 
         return vmap(f, in_axes=1, out_axes=1)(self.s)
 
     def roughness(self, order=2):
-        x = jnp.arange(0, self.T)
-        y = self(x)
-        return jnp.sum(jnp.diff(y, 0) ** 2)
-        # ds2 = self(x, derivative=2)
-        # return jnp.trapezoid(ds2**2, x, axis=0).sum()
+        t = self.t
+        s = self(t)
+        ds = jnp.diff(s, axis=0)
+        return jnp.sum(jnp.abs(s)) + jnp.sum(ds**2)
 
     @classmethod
     def default(cls, T, K):
@@ -88,7 +87,7 @@ class PiecewiseSelection:
 Selection = SplineSelection
 
 
-def sample_paths(sln, prior, data, num_paths, N_E, key):
+def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
     def get_seed():
         nonlocal key
         key, subkey = jax.random.split(key)
@@ -101,38 +100,48 @@ def sample_paths(sln, prior, data, num_paths, N_E, key):
     T = len(t_diff)
     alpha = np.zeros((T, P, K), dtype=np.int32)
     gamma = np.zeros((T, P), dtype=np.float32)
-    fixed_paths = np.empty((0, T, K))
     # have to convert to np.array because of buffer protocol stuff
     ll = np.zeros(1)
     theta = data.theta.clip(1e-5, 1 - 1e-5)
     theta /= theta.sum(1, keepdims=True)
-    for i in range(2):
-        # particle gibbs
-        forward_filter(
-            *map(
-                np.array,
-                (data.obs[:, 1], theta, sln(data.t), data.t, particles, log_weights),
+    forward_filter(
+        *map(
+            np.array,
+            (
+                data.obs[:, 1],
+                theta,
+                sln(data.t),
+                data.t,
+                particles,
+                log_weights,
+                mean_paths,
             ),
-            alpha,
-            gamma,
-            ll,
-            N_E,
-            get_seed(),
-            fixed_paths,
-        )
-        paths = backward_sample_batched(
-            alpha, gamma, sln(t_diff), N_E, num_paths, get_seed()
-        )
-        particles = paths[:, -1]  # particles at t=0
-        fixed_paths = paths[:1, ::-1]
-        print(ll, paths.mean(0)[:2])
+        ),
+        alpha,
+        gamma,
+        ll,
+        N_E,
+        get_seed(),
+    )
+    paths = backward_sample_batched(
+        alpha, gamma, sln(t_diff), N_E, num_paths, get_seed()
+    )
+    mean_paths[:] = paths[0]
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
-    return jnp.array(paths)[:, ::-1], t_diff, ll
+    paths = jnp.array(paths)[:, ::-1]
+    return paths, t_diff, ll
 
 
 def em(
-    sln0: Selection, data: Dataset, alpha, em_iterations, M, p_T=None, seed=42, N_E=1e4
+    sln0: Selection,
+    data: Dataset,
+    alpha,
+    em_iterations,
+    M,
+    mean_paths=None,
+    seed=42,
+    N_E=1e4,
 ):
     def binom_logpmf(n, N, p):
         p0 = jnp.isclose(p, 0.0)
@@ -194,12 +203,15 @@ def em(
     key = jax.random.PRNGKey(seed)
     key, subkey = jax.random.split(key)
     sln = sln0
-    if p_T is None:
+    if mean_paths is None:
         # uniform
         a = b = 1.0
     else:
-        a = 1000.0 * p_T
-        b = 1000.0 * (1 - p_T)
+        p = mean_paths[-1]
+        a = 100.0 * p
+        b = 100.0 * (1 - p)
+
+    mean_paths = (2 * N_E * mean_paths).astype(np.int32)  # scale to 2 * N_E
 
     # beta conditional segregation
     c = Counter()
@@ -233,7 +245,9 @@ def em(
     for i in range(em_iterations):
         assert prior[0].shape == (NUM_PARTICLES, data.K)
         key, subkey = jax.random.split(key)
-        paths, t_diff, ll = sample_paths(sln, prior, data, NUM_PARTICLES, N_E, subkey)
+        paths, t_diff, ll = sample_paths(
+            sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
+        )
         lls = np.append(lls, ll)
         # since time runs backwards (see above) paths[:, 0]
         # is the distribution at the most ancient time point

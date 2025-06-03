@@ -240,18 +240,21 @@ rule prior:
         except ValueError:
             raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
         K = data.K
-        p_T = []
+        mean_paths = []
+        Xt = sm.add_constant(np.arange(data.T).reshape(-1, 1))  # add constant for intercept
         for i in range(data.K):
-            x = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
-            y = [theta[i] * x[1] for x, y in zip(data.obs, data.t, data.theta) if x[0] > 0]
+            x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
+            y = np.array([theta[i] * x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0])
             # logistic regression using statsmodels
             X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
             model = sm.Logit(y, X)
             result = model.fit(disp=0)  # disp=0 to suppress output
             # predict at time x=T
-            p_T.append(result.predict(np.array([[1., data.T]])))
-        p_T = np.array(p_T).T  # [T, K]
-        dump_file(p_T, output[0])
+            pred = result.predict(Xt)
+            print(i, x, y, pred)
+            mean_paths.append(pred)
+        mean_paths = np.transpose(mean_paths)
+        dump_file(mean_paths, output[0])
 
 
 rule analyze:
@@ -269,7 +272,7 @@ rule analyze:
     threads: 8
     run:
         datasets, snps = load_file(input[0])
-        p_T = load_file(input[1])
+        mean_paths = load_file(input[1])
         wc = wildcards
         M = int(wc.M)
         try:
@@ -279,7 +282,7 @@ rule analyze:
         Ne = 1e4
         alpha, em_iterations, M = _params(wildcards)
         sln0 = Selection.default(T=data.T, K=data.K)
-        res = em(sln0, data, alpha, em_iterations, M, seed=42, p_T=p_T)
+        res = em(sln0, data, alpha, em_iterations, M, seed=42, mean_paths=mean_paths)
         dump_file(res, output[0])
 
 

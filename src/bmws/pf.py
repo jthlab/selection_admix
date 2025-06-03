@@ -153,7 +153,7 @@ def log_obs_likelihood(
 
 @njit(parallel=True, nogil=True)
 def forward_filter(
-    obs, thetas, s, t, particles, log_weights, alpha, gamma, ll, N_E, seed, fixed_paths
+    obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
 ):
     """
     Forward algorithm for the particle filter.
@@ -166,69 +166,58 @@ def forward_filter(
     np.random.seed(seed)
     N = len(obs)
     P, D = particles.shape
-    F = len(fixed_paths)
-    assert F <= P
-    assert fixed_paths.shape[2] == D
     ll[0] = 0.0
     # forward filtering recursion
     ell = 0
     weights_are_uniform = False
+    inds = np.empty(P, dtype=np.int32)
+    log_probs = np.empty(P, dtype=np.float32)
     for i in range(N):
-        tr = False
-        if (i > 0) and (t[i] != t[i - 1]):
-            # wright fisher mating
+        is_transition = (i > 0) and (t[i] != t[i - 1])
+
+        if is_transition:
+            # Resampling
             if weights_are_uniform:
-                # sample P integers from [0, P) with replacement
-                inds = np.random.randint(0, P, P)
-                particles = particles[inds]
+                for j in prange(1, P):  # Leave particle 0 unchanged
+                    particles[j] = np.random.randint(0, P)
             else:
-                resample(particles, log_weights, ll)
+                log_weights -= logsumexp(log_weights)
+                cum_weights = np.exp(log_weights).cumsum()
+                for j in prange(1, P):  # Leave particle 0 unchanged
+                    u = np.random.rand()
+                    particles[j] = particles[np.searchsorted(cum_weights, u)]
+                log_weights[:] = -np.log(P)  # Reset log_weights to uniform
                 weights_are_uniform = True
-            if F > 0:
-                particles[-F:, :] = fixed_paths[:, ell, :]
+
+            # Save state
             alpha[ell] = particles
             gamma[ell] = log_weights
             ell += 1
-            for j in prange(P - F):
+
+            # Mutation step
+            for j in prange(1, P):  # mutate only particles ≠ 0
                 for k in range(D):
                     p = float(particles[j, k]) / 2 / N_E
                     s_tk = s[t[i], k]
                     p_prime = (1 + s_tk / 2) * p / (1 + s_tk / 2 * p)
                     particles[j, k] = random_binomial_large_N(2 * N_E, p_prime)
-            # breakpoint()
-            # pass  # 1
-        else:
-            # observation
-            log_theta = np.log(thetas[i])
-            for j in prange(P):
-                n = particles[j]
-                log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
-                log_weights[j] += log_p_x
-                a = 1000
-                if False and j < P - F:
-                    for k in range(D):
-                        if particles[j, k] >= a and particles[j, k] <= 2 * N_E - a:
-                            x = np.random.randint(-a, a + 1)
-                            proposal = np.copy(particles[j])
-                            proposal[k] += x
-                            log_p_x_1 = log_obs_likelihood(
-                                proposal, obs[i], thetas[i], N_E
-                            )
-                            mh = log_p_x_1 - log_p_x
-                            if np.log(np.random.rand()) < mh:
-                                particles[j, k] = proposal[k]
-                                log_p_x = log_p_x_1
-            weights_are_uniform = False
-            # breakpoint()
-            # pass  # 2
-    # end loop
-    # final resampling step
-    # breakpoint()
-    resample(particles, log_weights, ll)
-    if F > 0:
-        particles[-F:, :] = fixed_paths[:, ell, :]
+
+            # Set fixed particle to ref path
+            for k in range(D):
+                particles[0, k] = ref_path[t[i], k]
+
+        # Observation step
+        for j in prange(P):
+            n = particles[j]
+            log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
+            log_weights[j] += log_p_x
+
+        weights_are_uniform = False
+
+    # Final resample (only update alpha/gamma, don't mutate)
     alpha[ell] = particles
     gamma[ell] = log_weights
+    resample(particles, log_weights, ll)
 
 
 @njit(nogil=True)
@@ -254,8 +243,7 @@ MAX_N = 400
 MAX_D = 4
 
 
-@cuda.jit(device=True)
-def binom_logpmf_gpu(x, n, p):
+def _binom_logpmf(x, n, p):
     """
     Compute the log PMF of a binomial distribution.
     x: number of successes
@@ -279,6 +267,10 @@ def binom_logpmf_gpu(x, n, p):
         + x * log_p
         + (n - x) * log_q
     )
+
+
+binom_logpmf = njit(_binom_logpmf, cache=True)
+binom_logpmf_gpu = cuda.jit(device=True)(_binom_logpmf)
 
 
 @cuda.jit(cache=True)
