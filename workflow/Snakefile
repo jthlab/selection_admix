@@ -239,15 +239,18 @@ rule prior:
             data = datasets[snps.index(wc.snp)]
         except ValueError:
             raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
-        x, y = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0], [
-            int(x[1]) for x, y in zip(data.obs, data.t) if x[0] > 0
-        ]
-        # logistic regression using statsmodels
-        X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
-        model = sm.Logit(y, X)
-        result = model.fit(disp=0)  # disp=0 to suppress output
-        # predict at time x=T
-        p_T = result.predict(np.array([[1., data.T]]))
+        K = data.K
+        p_T = []
+        for i in range(data.K):
+            x = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
+            y = [theta[i] * x[1] for x, y in zip(data.obs, data.t, data.theta) if x[0] > 0]
+            # logistic regression using statsmodels
+            X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
+            model = sm.Logit(y, X)
+            result = model.fit(disp=0)  # disp=0 to suppress output
+            # predict at time x=T
+            p_T.append(result.predict(np.array([[1., data.T]])))
+        p_T = np.array(p_T).T  # [T, K]
         dump_file(p_T, output[0])
 
 
