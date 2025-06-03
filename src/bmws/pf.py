@@ -170,24 +170,20 @@ def forward_filter(
     # forward filtering recursion
     ell = 0
     weights_are_uniform = False
-    inds = np.empty(P, dtype=np.int32)
-    log_probs = np.empty(P, dtype=np.float32)
     for i in range(N):
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
         if is_transition:
-            # Resampling
             if weights_are_uniform:
-                for j in prange(1, P):  # Leave particle 0 unchanged
-                    particles[j] = np.random.randint(0, P)
+                particles[1:] = particles[np.random.randint(0, P, size=P - 1)]
             else:
                 log_weights -= logsumexp(log_weights)
                 cum_weights = np.exp(log_weights).cumsum()
-                for j in prange(1, P):  # Leave particle 0 unchanged
-                    u = np.random.rand()
-                    particles[j] = particles[np.searchsorted(cum_weights, u)]
+                U = np.random.rand(P - 1)
+                inds = np.searchsorted(cum_weights, U, 'left')
+                particles[1:] = particles[inds]
                 log_weights[:] = -np.log(P)  # Reset log_weights to uniform
-                weights_are_uniform = True
+            weights_are_uniform = True
 
             # Save state
             alpha[ell] = particles
