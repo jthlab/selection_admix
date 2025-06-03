@@ -132,6 +132,7 @@ def forward_filter(
             else:
                 log_weights -= logsumexp(log_weights)
                 cum_weights = np.exp(log_weights).cumsum()
+                cum_weights[-1] = 1.0  # Ensure the last element is 1.0 for searchsorted
                 u = np.random.rand(P)
                 inds[:] = np.searchsorted(cum_weights, u, side="left")
             p0 = np.copy(particles[0])  # Save the first particle
@@ -149,25 +150,29 @@ def forward_filter(
             p = particles / 2 / N_E
             s_t = s[t[i]]
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
-            for j in prange(P):  # mutate only particles ≠ 0
-                for k in range(D):
-                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime[j, k])
+            particles[:] = np.random.binomial(2 * N_E, p_prime)
+            particles[0] = ref_path[t[i]]
 
-            # Set fixed particle to ref path
-            for k in range(D):
-                particles[0, k] = ref_path[t[i], k]
-
-        # Observation step
-        for j in prange(P):
-            n = particles[j]
-            log_p_x = log_obs_likelihood(n, obs[i], thetas[i], N_E)
-            log_weights[j] += log_p_x
-
-        weights_are_uniform = False
+        else:
+            # Observation step
+            x = particles / 2 / N_E
+            log_p_obs = np.log(
+                np.sum(
+                    np.exp(
+                        np.log(thetas[i])
+                        + obs[i] * np.log(x)
+                        + (1 - obs[i]) * np.log1p(-x)
+                    ),
+                    axis=1,
+                )
+            )
+            log_weights += log_p_obs
+            weights_are_uniform = False
 
     # Final resample
     log_weights -= logsumexp(log_weights)
     cum_weights = np.exp(log_weights).cumsum()
+    cum_weights[-1] = 1.0  # Ensure the last element is 1.0 for searchsorted
     u = np.random.rand(P)
     inds[:] = np.searchsorted(cum_weights, u, side="left")
     p0 = np.copy(particles[0])  # Save the first particle
