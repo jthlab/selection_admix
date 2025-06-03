@@ -150,7 +150,9 @@ def forward_filter(
             p = particles / 2 / N_E
             s_t = s[t[i]]
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
-            particles[:] = np.random.binomial(2 * N_E, p_prime)
+            for j in prange(P):
+                for k in range(D):
+                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime[j, k])
             particles[0] = ref_path[t[i]]
 
         else:
