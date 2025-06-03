@@ -122,17 +122,18 @@ def forward_filter(
     # forward filtering recursion
     ell = 0
     weights_are_uniform = False
+    inds = np.empty(P, dtype=np.int32)
     for i in range(N):
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
         if is_transition:
             if weights_are_uniform:
-                inds = np.random.randint(0, P, size=P)
+                inds[:] = np.random.randint(0, P, size=P)
             else:
                 log_weights -= logsumexp(log_weights)
                 cum_weights = np.exp(log_weights).cumsum()
                 u = np.random.rand(P)
-                inds = np.searchsorted(cum_weights, u, side="left")
+                inds[:] = np.searchsorted(cum_weights, u, side="left")
             p0 = np.copy(particles[0])  # Save the first particle
             particles[:] = particles[inds]
             particles[0] = p0
@@ -167,9 +168,11 @@ def forward_filter(
     # Final resample
     log_weights -= logsumexp(log_weights)
     cum_weights = np.exp(log_weights).cumsum()
-    u = np.random.rand(P - 1)
-    inds = np.searchsorted(cum_weights, u, side="left")
-    particles[1:] = particles[inds]
+    u = np.random.rand(P)
+    inds[:] = np.searchsorted(cum_weights, u, side="left")
+    p0 = np.copy(particles[0])  # Save the first particle
+    particles[:] = particles[inds]
+    particles[0] = p0
     log_weights[:] = -np.log(P)  # Reset log_weights to uniform
     alpha[ell] = particles
     gamma[ell] = log_weights
