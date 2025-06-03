@@ -3,6 +3,7 @@ from typing import NamedTuple, TypedDict
 
 import jax
 import numpy as np
+import statsmodels.api as sm
 from jax import numpy as jnp
 
 from .util import tree_stack
@@ -79,3 +80,26 @@ class Dataset(NamedTuple):
         assert ret.t.min() == T_MIN
         # assert len(ret.obs) == len(records) + T_MAX, (len(ret.obs), len(records), T_MAX)
         return ret
+
+
+def mean_paths(data: Dataset):
+    K = data.K
+    mean_paths = []
+    Xt = sm.add_constant(np.arange(data.T).reshape(-1, 1))  # add constant for intercept
+    for i in range(data.K):
+        x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
+        y = np.array(
+            [
+                theta[i] * x[1]
+                for x, y, theta in zip(data.obs, data.t, data.theta)
+                if x[0] > 0
+            ]
+        )
+        # logistic regression using statsmodels
+        X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
+        model = sm.Logit(y, X)
+        result = model.fit(disp=0)  # disp=0 to suppress output
+        # predict at time x=T
+        pred = result.predict(Xt)
+        mean_paths.append(pred)
+    return np.transpose(mean_paths)

@@ -277,4 +277,4 @@ def em(
         print(f"roughness: {sln.roughness(0)} {sln.roughness(1)} {sln.roughness(2)}")
         ret.append((sln, prior))
 
-    return (sln, prior), ret
+    return (sln, prior), {"paths": paths, "ret": ret}

@@ -78,59 +78,11 @@ def resample(particles, log_weights, ll):
     (P,) = log_weights.shape
     lse = logsumexp(log_weights)
     ll[0] += lse - np.log(P)
-
-    # seed = np.random.randint(1, 2**32 - 1)
-    # with objmode(inds="int32[:]"):
-    #     inds = gumbel_max_resample(log_weights, seed)
-    # particles[:] = particles[inds]
-    # log_weights[:] = -np.log(P)
-    # return
-
     weights = np.exp(log_weights - lse)
-    # residual resampling
-    residual_indices = np.empty(P, dtype=np.int32)
-    new_particles = np.empty_like(particles)
-    num_copies = np.floor(P * weights).astype(
-        np.int32
-    )  # Number of deterministic copies for each particle
-    # Create the deterministic copies
-    k = 0  # Index for the new_indices and new_particles array
-    for i in range(P):
-        for _ in range(num_copies[i]):
-            if k < P:  # Ensure we don't exceed the total number of particles
-                new_particles[k] = particles[i]
-                k += 1
-            else:
-                # This should ideally not happen if weights are normalized
-                # and sum to 1, but it's a safeguard.
-                break
-        if k >= P:
-            break
-    S = P - k  # Number of particles left to resample stochastically
-    if S > 0:  # stochastically resample small weight particles
-        # Calculate the residual weights
-        residual_weights = (P * weights) - num_copies
-        residual_weights /= np.sum(residual_weights)  # Normalize residual weights
-
-        # Perform multinomial resampling on the residuals
-        # This draws `num_to_resample_stochastic` samples based on `residual_weights`
-        cs = np.cumsum(residual_weights)
-        # Ensure the last element is exactly 1.0 to avoid floating point issues
-        cs[-1] = 1.0
-
-        # Generate random numbers for selecting from residuals
-        u = np.random.rand(S)
-
-        # Find corresponding indices using searchsorted (efficient way to do inverse CDF)
-        for s in prange(S):
-            residual_indices[s] = np.searchsorted(cs, u[s], side="left")
-
-        new_particles[-S:] = particles[
-            residual_indices[:S]
-        ]  # Fill the rest of new_particles with stochastic samples
-
-    # Update particles and log_weights
-    particles[:] = new_particles
+    w_cs = np.cumsum(weights)
+    U = np.random.rand(P)
+    inds = np.searchsorted(w_cs, inds, side="left")
+    particles[:] = particles[inds]  # Resample particles based on indices
     log_weights[:] = -np.log(P)
 
 
@@ -151,7 +103,7 @@ def log_obs_likelihood(
     return logsumexp(log_p + np.log(theta))
 
 
-@njit(parallel=True, nogil=True)
+@njit(parallel=True)
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
 ):
@@ -175,14 +127,16 @@ def forward_filter(
 
         if is_transition:
             if weights_are_uniform:
-                particles[1:] = particles[np.random.randint(0, P, size=P - 1)]
+                inds = np.random.randint(0, P, size=P)
             else:
                 log_weights -= logsumexp(log_weights)
                 cum_weights = np.exp(log_weights).cumsum()
-                U = np.random.rand(P - 1)
-                inds = np.searchsorted(cum_weights, U, 'left')
-                particles[1:] = particles[inds]
-                log_weights[:] = -np.log(P)  # Reset log_weights to uniform
+                u = np.random.rand(P)
+                inds = np.searchsorted(cum_weights, u, side="left")
+            p0 = np.copy(particles[0])  # Save the first particle
+            particles[:] = particles[inds]
+            particles[0] = p0
+            log_weights[:] = -np.log(P)  # Reset log_weights to uniform
             weights_are_uniform = True
 
             # Save state
@@ -191,12 +145,12 @@ def forward_filter(
             ell += 1
 
             # Mutation step
-            for j in prange(1, P):  # mutate only particles ≠ 0
+            p = particles / 2 / N_E
+            s_t = s[t[i]]
+            p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
+            for j in prange(P):  # mutate only particles ≠ 0
                 for k in range(D):
-                    p = float(particles[j, k]) / 2 / N_E
-                    s_tk = s[t[i], k]
-                    p_prime = (1 + s_tk / 2) * p / (1 + s_tk / 2 * p)
-                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime)
+                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime[j, k])
 
             # Set fixed particle to ref path
             for k in range(D):
@@ -210,10 +164,15 @@ def forward_filter(
 
         weights_are_uniform = False
 
-    # Final resample (only update alpha/gamma, don't mutate)
+    # Final resample
+    log_weights -= logsumexp(log_weights)
+    cum_weights = np.exp(log_weights).cumsum()
+    u = np.random.rand(P - 1)
+    inds = np.searchsorted(cum_weights, u, side="left")
+    particles[1:] = particles[inds]
+    log_weights[:] = -np.log(P)  # Reset log_weights to uniform
     alpha[ell] = particles
     gamma[ell] = log_weights
-    resample(particles, log_weights, ll)
 
 
 @njit(nogil=True)
