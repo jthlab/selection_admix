@@ -207,7 +207,7 @@ def em(
         # uniform
         a = b = 1.0
     else:
-        p = mean_paths[-1]
+        p = mean_paths[-1].clip(0.001, 1 - 0.001)
         a = 100.0 * p
         b = 100.0 * (1 - p)
 
