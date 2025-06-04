@@ -203,42 +203,30 @@ def em(
     key = jax.random.PRNGKey(seed)
     key, subkey = jax.random.split(key)
     sln = sln0
+
     if mean_paths is None:
         # uniform
         a = b = 1.0
     else:
         p = mean_paths[-1].clip(0.001, 1 - 0.001)
-        a = 100.0 * p
-        b = 100.0 * (1 - p)
+        a = p
+        b = 1 - p
 
     mean_paths = (2 * N_E * mean_paths).astype(np.int32)  # scale to 2 * N_E
 
-    # beta conditional segregation
-    c = Counter()
-    prior = jnp.ones((0, data.K), dtype=np.int32)
-    while len(c) < NUM_PARTICLES:
-        key, subkey = jax.random.split(key)
-        # sample from beta distribution
-        sample = jax.random.beta(
-            subkey,
-            a,
-            b,
-            (
-                NUM_PARTICLES,
-                data.K,
-            ),
-        )
-        sample = (2 * N_E * sample).astype(np.int32)
-        sample = sample[(sample > 0).all(1) & (sample < 2 * N_E).all(1)]
-        c.update(Counter(map(tuple, sample.tolist())))
-        prior = jnp.concatenate([prior, sample], axis=0)
-        # scale to 2 * N_E
-    particles, counts = [
-        jnp.array(x, dtype=jnp.int32) for x in zip(*c.most_common(NUM_PARTICLES))
-    ]
-    log_weights = jnp.log(counts) - np.log(counts.sum())
+    # find a step size such that the number of particles is approximately NUM_PARTICLES
+    # ((2 * N_E) / step_size) ** data.K ~= NUM_PARTICLES
+    # step_size = int((2 * N_E) / (NUM_PARTICLES ** (1 / data.K)))
+    # print("step size:", step_size)
+    # sl = slice(0, int(2 * N_E), step_size)
+    # particles = jnp.mgrid[(sl,) * data.K].reshape(data.K, -1).T
+    particles = np.random.randint(0, 2 * N_E + 1, size=(NUM_PARTICLES, data.K)).astype(
+        np.int32
+    )
+    log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
     prior = (particles, log_weights)
 
+    # em loop
     lls = []
     last_lls = None
     ret = []

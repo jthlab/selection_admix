@@ -2,7 +2,9 @@ import random
 from typing import NamedTuple, TypedDict
 
 import jax
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import statsmodels.api as sm
 from jax import numpy as jnp
 
@@ -103,3 +105,62 @@ def mean_paths(data: Dataset):
         pred = result.predict(Xt)
         mean_paths.append(pred)
     return np.transpose(mean_paths)
+
+
+def regression_plot(data: Dataset):
+    # create a K-panel plot with sns.regplot for each population
+
+    fig, axes = plt.subplots(data.K, 1, figsize=(10, 5 * data.K))
+    time_grid = np.arange(data.T)
+    Xt = sm.add_constant(time_grid.reshape(-1, 1))  # add constant for intercept
+    for i in range(data.K):
+        x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
+        y = np.array(
+            [
+                theta[i] * x[1]
+                for x, y, theta in zip(data.obs, data.t, data.theta)
+                if x[0] > 0
+            ]
+        )
+        # logistic regression using statsmodels
+        X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
+        model = sm.Logit(y, X)
+        result = model.fit(disp=0)  # disp=0 to suppress output
+
+        preds = []
+        n_boot = 100
+        for _ in range(n_boot):
+            idx = np.random.choice(len(x), size=len(x), replace=True)
+            xb = x[idx]
+            yb = y[idx]
+            resample_model = sm.Logit(yb, sm.add_constant(xb.reshape(-1, 1))).fit(
+                disp=0
+            )
+            ypred = resample_model.predict(Xt)
+            preds.append(ypred)
+
+        preds = np.array(preds)
+        alpha = 0.95
+        lower = np.percentile(preds, 100 * alpha / 2, axis=0)
+        upper = np.percentile(preds, 100 * (1 - alpha / 2), axis=0)
+        mean_pred = result.predict(Xt)
+
+        ax = axes[i]
+        ax.plot(x, y, "o", alpha=0.5)
+        ax.plot(time_grid, mean_pred, label="Mean prediction", color="blue")
+        ax.fill_between(
+            time_grid,
+            lower,
+            upper,
+            color="blue",
+            alpha=0.2,
+            label=f"{int((1-alpha)*100)}% CI",
+        )
+        ax.set_title(f"Population {i + 1}")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Admixture loading")
+        ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+    return plt

@@ -24,7 +24,7 @@ def random_binomial_large_N(n, p):
     return k
 
 
-@njit
+@njit(parallel=True)
 def logsumexp(a):
     """
     Numerically stable logsumexp function.
@@ -104,6 +104,45 @@ def log_obs_likelihood(
 
 
 @njit(parallel=True)
+def resample(
+    particles: np.ndarray,
+    log_weights: np.ndarray,
+    ll: np.ndarray,
+    weights_are_uniform: bool = False,
+) -> None:
+    """
+    Resample particles according to their log weights.
+    particles: [P, D] array of particles
+    log_weights: [P] array of log weights
+    ll: [1] array to accumulate log likelihood
+    """
+    (P, D) = particles.shape
+    p0 = np.copy(particles[0])  # Save the first particle
+    lse = logsumexp(log_weights)
+    ll[0] += lse - np.log(P)
+    if weights_are_uniform:
+        inds = np.random.randint(0, P, size=P)
+    else:
+        weights = np.exp(log_weights - lse)
+        w_cs = np.cumsum(weights)
+        U = np.random.rand(P)
+        inds = np.searchsorted(w_cs, U, side="left")
+    particles[:] = particles[inds]
+    particles[0] = p0  # Restore the first particle
+    log_weights[:] = -np.log(P)  # Reset log weights to uniform
+
+
+@njit(parallel=True)
+def xlogy(x, y):
+    return np.where((x == 0.0) & (y == 0.0), 0.0, x * np.log(y))
+
+
+@njit(parallel=True)
+def xlog1py(x, y):
+    return np.where((x == 0.0) & (y == -1.0), 0.0, x * np.log1p(y))
+
+
+@njit(parallel=True)
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
 ):
@@ -127,19 +166,13 @@ def forward_filter(
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
         if is_transition:
-            if weights_are_uniform:
-                inds[:] = np.random.randint(0, P, size=P)
-            else:
-                log_weights -= logsumexp(log_weights)
-                cum_weights = np.exp(log_weights).cumsum()
-                cum_weights[-1] = 1.0  # Ensure the last element is 1.0 for searchsorted
-                u = np.random.rand(P)
-                inds[:] = np.searchsorted(cum_weights, u, side="left")
-            p0 = np.copy(particles[0])  # Save the first particle
-            particles[:] = particles[inds]
-            particles[0] = p0
-            log_weights[:] = -np.log(P)  # Reset log_weights to uniform
-            weights_are_uniform = True
+            # resample if ess is too low
+            log_weights -= logsumexp(log_weights)
+            ess = 1.0 / np.sum(np.exp(2 * log_weights))
+            if ess < P / 2:
+                # print("ess", ess, "resampling")
+                resample(particles, log_weights, ll, weights_are_uniform)
+                weights_are_uniform = True
 
             # Save state
             alpha[ell] = particles
@@ -153,6 +186,7 @@ def forward_filter(
             for j in prange(P):
                 for k in range(D):
                     particles[j, k] = random_binomial_large_N(2 * N_E, p_prime[j, k])
+
             particles[0] = ref_path[t[i]]
 
         else:
@@ -161,9 +195,7 @@ def forward_filter(
             log_p_obs = np.log(
                 np.sum(
                     np.exp(
-                        np.log(thetas[i])
-                        + obs[i] * np.log(x)
-                        + (1 - obs[i]) * np.log1p(-x)
+                        np.log(thetas[i]) + xlogy(obs[i], x) + xlog1py(1 - obs[i], -x)
                     ),
                     axis=1,
                 )
@@ -172,15 +204,6 @@ def forward_filter(
             weights_are_uniform = False
 
     # Final resample
-    log_weights -= logsumexp(log_weights)
-    cum_weights = np.exp(log_weights).cumsum()
-    cum_weights[-1] = 1.0  # Ensure the last element is 1.0 for searchsorted
-    u = np.random.rand(P)
-    inds[:] = np.searchsorted(cum_weights, u, side="left")
-    p0 = np.copy(particles[0])  # Save the first particle
-    particles[:] = particles[inds]
-    particles[0] = p0
-    log_weights[:] = -np.log(P)  # Reset log_weights to uniform
     alpha[ell] = particles
     gamma[ell] = log_weights
 
