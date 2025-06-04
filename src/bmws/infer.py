@@ -207,7 +207,6 @@ def em(
     if mean_paths is None:
         mean_paths = bmws.data.mean_paths(data, NUM_PARTICLES)
 
-    breakpoint()
     particles = (2 * N_E * mean_paths[:, -1]).astype(np.int32)  # scale to 2 * N_E
     log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
     mean_paths = (2 * N_E * mean_paths.mean(0)).astype(np.int32)

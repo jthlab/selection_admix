@@ -208,7 +208,6 @@ rule prior:
         "results/{population}/data.pkl",
     output:
         "results/{population}/{snp}/prior_{M}.pkl"
-    localrule: True
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -327,8 +326,9 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a2/em5/M10000/{population}_{snp}.pdf"
+            config["figure_path"] + f"/a{a}/em5/M10000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
+            for a in [1, 2, 3]
         ]
 
