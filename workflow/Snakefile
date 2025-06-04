@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 N_E = 1e4
+RUNTIME = 180
 
 def plot_trajectories(pop, outfile, sln, sln_samples, paths, data):
     pop_cols = {
@@ -230,7 +231,7 @@ rule analyze:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/paths.pkl"
     resources:
         gpus=1,
-        runtime=60,
+        runtime=RUNTIME,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -262,7 +263,7 @@ rule resample:
     threads: 8
     resources:
         gpus=1,
-        runtime=60,
+        runtime=RUNTIME,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -326,7 +327,7 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a2/em10/M2500/{population}_{snp}.pdf"
+            config["figure_path"] + f"/a2/em5/M10000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
         ]
