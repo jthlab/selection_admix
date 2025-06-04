@@ -230,7 +230,7 @@ rule analyze:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/paths.pkl"
     resources:
         gpus=1,
-        runtime=720,
+        runtime=60,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
@@ -262,7 +262,7 @@ rule resample:
     threads: 8
     resources:
         gpus=1,
-        runtime=720,
+        runtime=60,
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
