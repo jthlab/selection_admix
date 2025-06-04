@@ -113,7 +113,7 @@ def read_data(pop):
 def run_analysis(data, sln0=None, alpha=1e4, em_iterations=50, M=10_000):
     if sln0 is None:
         sln0 = Selection.default(T=data.T, K=data.K)
-    mp = bmws.data.mean_paths(data)
+    mp = bmws.data.mean_paths(data, M)
     return em(sln0=sln0, data=data, alpha=alpha, mean_paths=mp, em_iterations=em_iterations, M=M, seed=42, N_E=N_E)
 
 def resample_individuals(data, Ne, rng, em_iterations, alpha, M):
@@ -206,7 +206,7 @@ rule prior:
     input:
         "results/{population}/data.pkl",
     output:
-        "results/{population}/{snp}/prior.pkl"
+        "results/{population}/{snp}/prior_{M}.pkl"
     localrule: True
     run:
         jax.config.update("jax_platforms", "cpu")
@@ -216,14 +216,15 @@ rule prior:
             data = datasets[snps.index(wc.snp)]
         except ValueError:
             raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
-        mp = bmws.data.mean_paths(data)
+        M = int(wc.M)
+        mp = bmws.data.mean_paths(data, M)
         dump_file(mp, output[0])
 
 
 rule analyze:
     input:
         "results/{population}/data.pkl",
-        "results/{population}/{snp}/prior.pkl",
+        "results/{population}/{snp}/prior_{M}.pkl",
     output:
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl",
         "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/paths.pkl"

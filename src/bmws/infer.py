@@ -205,25 +205,13 @@ def em(
     sln = sln0
 
     if mean_paths is None:
-        # uniform
-        a = b = 1.0
-    else:
-        p = mean_paths[-1].clip(0.001, 1 - 0.001)
-        a = p
-        b = 1 - p
+        mean_paths = bmws.data.mean_paths(data, NUM_PARTICLES)
 
-    mean_paths = (2 * N_E * mean_paths).astype(np.int32)  # scale to 2 * N_E
-
-    # find a step size such that the number of particles is approximately NUM_PARTICLES
-    # ((2 * N_E) / step_size) ** data.K ~= NUM_PARTICLES
-    # step_size = int((2 * N_E) / (NUM_PARTICLES ** (1 / data.K)))
-    # print("step size:", step_size)
-    # sl = slice(0, int(2 * N_E), step_size)
-    # particles = jnp.mgrid[(sl,) * data.K].reshape(data.K, -1).T
-    particles = np.random.randint(0, 2 * N_E + 1, size=(NUM_PARTICLES, data.K)).astype(
-        np.int32
-    )
+    breakpoint()
+    particles = (2 * N_E * mean_paths[:, -1]).astype(np.int32)  # scale to 2 * N_E
     log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
+    mean_paths = (2 * N_E * mean_paths.mean(0)).astype(np.int32)
+    assert particles.shape == (NUM_PARTICLES, data.K)
     prior = (particles, log_weights)
 
     # em loop

@@ -84,27 +84,35 @@ class Dataset(NamedTuple):
         return ret
 
 
-def mean_paths(data: Dataset):
+def mean_paths(data: Dataset, num_paths: int):
     K = data.K
-    mean_paths = []
+    ret = []
     Xt = sm.add_constant(np.arange(data.T).reshape(-1, 1))  # add constant for intercept
     for i in range(data.K):
         x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
         y = np.array(
-            [
-                theta[i] * x[1]
-                for x, y, theta in zip(data.obs, data.t, data.theta)
-                if x[0] > 0
-            ]
+            [x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
         )
-        # logistic regression using statsmodels
-        X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
-        model = sm.Logit(y, X)
-        result = model.fit(disp=0)  # disp=0 to suppress output
-        # predict at time x=T
-        pred = result.predict(Xt)
-        mean_paths.append(pred)
-    return np.transpose(mean_paths)
+        wts = np.array(
+            [th[i] for x, y, th in zip(data.obs, data.t, data.theta) if x[0] > 0]
+        )
+        preds = []
+        for _ in range(num_paths):
+            idx = np.random.choice(len(x), size=len(x), replace=True)
+            xb = x[idx]
+            yb = y[idx]
+            wtsb = wts[idx]
+            resample_model = sm.GLM(
+                yb,
+                sm.add_constant(xb.reshape(-1, 1)),
+                family=sm.families.Binomial(),
+                freq_weights=wtsb,
+            ).fit(disp=0)
+            ypred = resample_model.predict(Xt)
+            preds.append(ypred)
+        ret.append(preds)
+    ret = np.transpose(ret, (1, 2, 0))  # [K, num_paths, T] => [num_paths, T, K]
+    return ret
 
 
 def regression_plot(data: Dataset):
@@ -116,15 +124,15 @@ def regression_plot(data: Dataset):
     for i in range(data.K):
         x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
         y = np.array(
-            [
-                theta[i] * x[1]
-                for x, y, theta in zip(data.obs, data.t, data.theta)
-                if x[0] > 0
-            ]
+            [x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
+        )
+        wts = np.array(
+            [th[i] for x, y, th in zip(data.obs, data.t, data.theta) if x[0] > 0]
         )
         # logistic regression using statsmodels
         X = sm.add_constant(np.array(x).reshape(-1, 1))  # add constant for intercept
-        model = sm.Logit(y, X)
+        # model = sm.Logit(y, X, freq_weights=wts)
+        model = sm.GLM(y, X, family=sm.families.Binomial(), freq_weights=wts)
         result = model.fit(disp=0)  # disp=0 to suppress output
 
         preds = []
@@ -133,9 +141,13 @@ def regression_plot(data: Dataset):
             idx = np.random.choice(len(x), size=len(x), replace=True)
             xb = x[idx]
             yb = y[idx]
-            resample_model = sm.Logit(yb, sm.add_constant(xb.reshape(-1, 1))).fit(
-                disp=0
-            )
+            wtsb = wts[idx]
+            resample_model = sm.GLM(
+                yb,
+                sm.add_constant(xb.reshape(-1, 1)),
+                family=sm.families.Binomial(),
+                freq_weights=wtsb,
+            ).fit(disp=0)
             ypred = resample_model.predict(Xt)
             preds.append(ypred)
 
@@ -146,7 +158,7 @@ def regression_plot(data: Dataset):
         mean_pred = result.predict(Xt)
 
         ax = axes[i]
-        ax.plot(x, y, "o", alpha=0.5)
+        ax.scatter(x, y, alpha=wts)
         ax.plot(time_grid, mean_pred, label="Mean prediction", color="blue")
         ax.fill_between(
             time_grid,
