@@ -12,6 +12,10 @@ config.CUDA_ENABLE_PYNVJITLINK = 1
 
 @njit
 def random_binomial_large_N(n, p):
+    if p == 0.0:
+        return 0
+    if p == 1.0:
+        return n
     if p * n < 10.0:
         return np.random.poisson(n * p)
     elif p * n > n - 10.0:
@@ -70,37 +74,6 @@ def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
     )
 
     return d_inds.copy_to_host()
-
-
-@njit(parallel=True)
-def resample(particles, log_weights, ll):
-    # resample particles according to weights
-    (P,) = log_weights.shape
-    lse = logsumexp(log_weights)
-    ll[0] += lse - np.log(P)
-    weights = np.exp(log_weights - lse)
-    w_cs = np.cumsum(weights)
-    U = np.random.rand(P)
-    inds = np.searchsorted(w_cs, inds, side="left")
-    particles[:] = particles[inds]  # Resample particles based on indices
-    log_weights[:] = -np.log(P)
-
-
-@njit
-def log_obs_likelihood(
-    x: np.ndarray, obs: np.ndarray, theta: np.ndarray, N_E: int
-) -> float:
-    """Compute log p(obs | x, theta)"""
-    p = x / (2 * N_E)
-    p_safe = np.where((x == 0) | (x == 2 * N_E), 0.5, p)
-
-    log_p = obs * np.log(p_safe) + (1 - obs) * np.log1p(-p_safe)
-    log_p = np.where((obs == 0) & (x == 0), 0.0, log_p)
-    log_p = np.where((obs == 1) & (x == 0), -np.inf, log_p)
-    log_p = np.where((obs == 0) & (x == 2 * N_E), -np.inf, log_p)
-    log_p = np.where((obs == 1) & (x == 2 * N_E), 0.0, log_p)
-
-    return logsumexp(log_p + np.log(theta))
 
 
 @njit(parallel=True)
@@ -185,7 +158,12 @@ def forward_filter(
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
             for j in prange(P):
                 for k in range(D):
-                    particles[j, k] = random_binomial_large_N(2 * N_E, p_prime[j, k])
+                    if particles[j, k] > 0 and particles[j, k] < 2 * N_E:
+                        # sampling not necessary if fixed. also small numerical errors
+                        # can cause p_prime \notin [0, 1]
+                        particles[j, k] = random_binomial_large_N(
+                            2 * N_E, p_prime[j, k]
+                        )
 
             particles[0] = ref_path[t[i]]
 
