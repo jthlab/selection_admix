@@ -44,6 +44,8 @@ dependencies = [
     "pynvjitlink-cu12>=0.6.0",
     "interpax>=0.3.8",
     "nvidia-cublas-cu12>12.8",
+    "blackjax>=1.2.5",
+    "tqdm>=4.67.1",
 ]
 requires-python = ">=3.12"
 readme = "README.md"

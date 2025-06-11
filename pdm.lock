@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:27fb77d08ec38cc74aa0289dd4659685d5b2d93c4de77dc20aabb3495bbf638c"
+content_hash = "sha256:b504dc8309a96ba9e6b3b82d7dd28f0a308615e63e4e147ae1efdf32604e8743"
 
 [[metadata.targets]]
 requires_python = ">=3.12"
@@ -215,6 +215,25 @@ files = [
     {file = "black-24.10.0-cp313-cp313-win_amd64.whl", hash = "sha256:680359d932801c76d2e9c9068d05c6b107f2584b2a5b88831c83962eb9984c1b"},
     {file = "black-24.10.0-py3-none-any.whl", hash = "sha256:3bb2b7a1f7b685f85b11fed1ef10f8a9148bceb49853e47a294a3dd963c1dd7d"},
     {file = "black-24.10.0.tar.gz", hash = "sha256:846ea64c97afe3bc677b761787993be4991810ecc7a4a937816dd6bddedc4875"},
+]
+
+[[package]]
+name = "blackjax"
+version = "1.2.5"
+requires_python = ">=3.9"
+summary = "Flexible and fast sampling in Python"
+groups = ["default"]
+dependencies = [
+    "fastprogress>=1.0.0",
+    "jax>=0.4.16",
+    "jaxlib>=0.4.16",
+    "jaxopt>=0.8",
+    "optax>=0.1.7",
+    "typing-extensions>=4.4.0",
+]
+files = [
+    {file = "blackjax-1.2.5-py3-none-any.whl", hash = "sha256:b46c31857ee9ff47027aa915c2c8d7eca3fec757f5054c6979ae0f2ee83cc773"},
+    {file = "blackjax-1.2.5.tar.gz", hash = "sha256:8fedfc8de2ad33e4c170de4648d8301374e386fd68d8db91bf03f1bd2d0f5e97"},
 ]
 
 [[package]]
@@ -633,6 +652,17 @@ groups = ["default", "dev"]
 files = [
     {file = "fastjsonschema-2.21.1-py3-none-any.whl", hash = "sha256:c9e5b7e908310918cf494a434eeb31384dd84a98b57a30bcb1f535015b554667"},
     {file = "fastjsonschema-2.21.1.tar.gz", hash = "sha256:794d4f0a58f848961ba16af7b9c85a3e88cd360df008c59aac6fc5ae9323b5d4"},
+]
+
+[[package]]
+name = "fastprogress"
+version = "1.0.3"
+requires_python = ">=3.6"
+summary = "A nested progress with plotting options for fastai"
+groups = ["default"]
+files = [
+    {file = "fastprogress-1.0.3-py3-none-any.whl", hash = "sha256:6dfea88f7a4717b0a8d6ee2048beae5dbed369f932a368c5dd9caff34796f7c5"},
+    {file = "fastprogress-1.0.3.tar.gz", hash = "sha256:7a17d2b438890f838c048eefce32c4ded47197ecc8ea042cecc33d3deb8022f5"},
 ]
 
 [[package]]
