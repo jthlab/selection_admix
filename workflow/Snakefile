@@ -236,7 +236,7 @@ rule analyze:
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
-    threads: 8
+    threads: 32
     run:
         datasets, snps = load_file(input[0])
         mean_paths = load_file(input[1])
@@ -322,9 +322,9 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a{a}/em5/M10000/{population}_{snp}.pdf"
+            config["figure_path"] + f"/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
-            for a in [1, 2, 3]
+            for a in [1]
         ]
 
