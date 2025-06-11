@@ -3,6 +3,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
+import blackjax
 import gnuplotlib as gp
 import interpax
 import jax
@@ -10,7 +11,10 @@ import jax.numpy as jnp
 import jaxopt
 import numpy as np
 import optimistix as optx
-from jax import jit, vmap
+import tqdm
+from jax import jit, lax, vmap
+
+import bmws.data
 
 from .data import Dataset
 from .flsa import flsa
@@ -32,10 +36,13 @@ class SplineSelection:
     s: jnp.ndarray
 
     @property
-    def t(self):
+    def M(self):
         assert self.s.ndim == 2
-        M = len(self.s)
-        return jnp.linspace(0, self.T, M)
+        return self.s.shape[0]
+
+    @property
+    def t(self):
+        return jnp.linspace(0, self.T, self.M)
 
     def __call__(self, xq, derivative=0):
         assert xq.ndim == 1
@@ -45,11 +52,9 @@ class SplineSelection:
 
         return vmap(f, in_axes=1, out_axes=1)(self.s)
 
-    def roughness(self, order=2):
-        t = self.t
-        s = self(t)
-        ds = jnp.diff(s, axis=0)
-        return jnp.sum(jnp.abs(s)) + jnp.sum(ds**2)
+    def roughness(self):
+        ds = jnp.diff(self.s, n=2, axis=0)
+        return jnp.sum(ds**2)
 
     @classmethod
     def default(cls, T, K):
@@ -133,11 +138,11 @@ def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
     return paths, t_diff, ll
 
 
-def em(
+def gibbs(
     sln0: Selection,
     data: Dataset,
     alpha,
-    em_iterations,
+    niter,
     M,
     mean_paths=None,
     seed=42,
@@ -165,7 +170,7 @@ def em(
         return ret.sum()
 
     def obj(sln, args):
-        paths, t = args
+        alpha, beta, paths, t = args
         s = sln(t[1:])  # t
 
         @vmap
@@ -175,21 +180,13 @@ def em(
         lls = f(paths[:, :-1], paths[:, 1:])
         BOUND = 0.1
         bound_pen = jax.nn.relu(jnp.abs(s) - BOUND).sum()
-        ret = -lls.mean() + 1e3 * bound_pen + alpha * sln.roughness()
+        ret = (
+            -lls.mean()
+            + 1e3 * bound_pen
+            + alpha * sln.roughness()
+            + beta * jnp.abs(sln.s).sum()
+        )
         return jnp.where(~jnp.isfinite(ret), jnp.inf, ret)
-
-    def prox(sln, l1reg, scaling):
-        prox_s = vmap(flsa, (1, None), 1)(sln.s, l1reg * scaling)
-        return replace(sln, s=prox_s)
-
-    bfgs = optx.BFGS(1e-4, 1e-4)
-    opt = jaxopt.ProximalGradient(obj, prox)
-
-    def step(sln, paths, t):
-        with jax.debug_nans(True):
-            return optx.minimise(obj, bfgs, sln, args=(paths, t), max_steps=None).value
-        # res = opt.run(sln, hyperparams_prox=alpha, args=(paths, t))
-        # return res.params
 
     # assumption: data always starts and ends with an observation (not a transition)
     # illustration: t = [5, 5, 4, 3, 2, 1, 0, 0, 0]
@@ -213,14 +210,57 @@ def em(
     assert particles.shape == (NUM_PARTICLES, data.K)
     prior = (particles, log_weights)
 
+    paths, t, ll = sample_paths(
+        sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
+    )
+
+    beta = alpha
+
+    # run warmup once
+    def logdensity(x):
+        return -obj(x, (alpha, beta, paths, t))
+
+    # HMC
+    warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+    key, warmup_key, sample_key = jax.random.split(key, 3)
+    (state, warmup_parameters), _ = warmup.run(warmup_key, sln, num_steps=1000)
+
+    # a, b such that gamma with mean=alpha and variance=sqrt alpha
+    # a*b = alpha
+    # a*b**2 = sqrt(alpha)
+    # alpha*b = sqrt(alpha) => b=1/sqrt(alpha)
+    prior_a = prior_b = jnp.sqrt(alpha)
+
+    @jit
+    def step(sln, alpha, beta, paths, t, key):
+        def logdensity(x):
+            return -obj(x, (alpha, beta, paths, t))
+
+        nuts = blackjax.nuts(logdensity, **warmup_parameters)
+        state = nuts.init(sln)
+
+        def body(state, key):
+            state, _ = nuts.step(key, state)
+            return state, None
+
+        key0, key1, key2 = jax.random.split(key, 3)
+        last_state, _ = lax.scan(body, state, jax.random.split(key0, 100))
+        # sample alpha conditionally
+        a = prior_a + sln.M / 2
+        b_alpha = prior_b + sln.roughness() / 2
+        b_beta = prior_b + jnp.abs(sln.s).sum() / 2
+        alpha = jax.random.gamma(key1, a=a, shape=()) * b_alpha
+        beta = jax.random.gamma(key2, a=a, shape=()) * b_beta
+        return last_state.position, alpha, beta
+
     # em loop
     lls = []
     last_lls = None
     ret = []
-    for i in range(em_iterations):
+    for i in tqdm.trange(niter):
         assert prior[0].shape == (NUM_PARTICLES, data.K)
         key, subkey = jax.random.split(key)
-        paths, t_diff, ll = sample_paths(
+        paths, t, ll = sample_paths(
             sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
         )
         lls = np.append(lls, ll)
@@ -231,25 +271,28 @@ def em(
             np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
         )
         p = paths.mean(0) / 2 / N_E
-        gp.plot(
-            *[(t_diff[::-1], y[::-1]) for y in p.T],
-            _with="lines",
-            title="afs",
-            terminal="dumb 120,30",
-            unset="grid",
+        # gp.plot(
+        #     *[(t[::-1], y[::-1]) for y in p.T],
+        #     _with="lines",
+        #     title="afs",
+        #     terminal="dumb 120,30",
+        #     unset="grid",
+        # )
+        key, subkey = jax.random.split(key)
+        sln, alpha, beta = step(
+            sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
         )
-        if True:
-            sln = step(sln, paths=paths, t=t_diff)
-            s = sln(t_diff[:-1])
-            gp.plot(
-                *[(t_diff[::-1][:-1], y[::-1]) for y in s.T],
-                _with="lines",
-                title="selection",
-                terminal="dumb 120,30",
-                unset="grid",
-            )
-        print(lls)
-        print(f"roughness: {sln.roughness(0)} {sln.roughness(1)} {sln.roughness(2)}")
-        ret.append((sln, prior))
+        s = sln(t[:-1])
+        # gp.plot(
+        #     *[(t[::-1][:-1], y[::-1]) for y in s.T],
+        #     _with="lines",
+        #     title="selection",
+        #     terminal="dumb 120,30",
+        #     unset="grid",
+        # )
+        # print(lls)
+        # print(f"{sln.roughness()=} {alpha=} {beta=}")
+        ret.append((sln, paths[0]))
 
-    return (sln, prior), {"paths": paths, "ret": ret}
+    slns, paths = zip(*ret)
+    return (slns, paths)
