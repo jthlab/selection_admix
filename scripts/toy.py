@@ -48,7 +48,7 @@ importlib.reload(bmws.betamix)
 sln = bmws.infer.Selection.default(T, D)
 a = b = np.ones(D)
 ab = np.array([a, b])
-bmws.infer.gibbs(sln, data, em_iterations=100, alpha=10., M=5000, N_E=10_000, mean_paths=None)
+bmws.infer.gibbs(sln, data, niter=100, alpha=10., M=5000, N_E=10_000, mean_paths=None)
 breakpoint()
 
 
