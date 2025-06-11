@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numba
 import numpy as np
+import scipy
 from numba import njit, prange
 from scipy.special import logsumexp
 
@@ -166,6 +167,9 @@ def backward_sample_batched(
 ) -> np.ndarray:
     # alpha: (N, P, D)
     # gamma: (N, P)
+    if (~np.isfinite(alpha).any()) or (~np.isfinite(gamma).any()):
+        raise ValueError("NaN detected in alpha or gamma")
+
     key = jax.random.key(seed)
     rng_np = np.random.default_rng(seed)
 
@@ -173,23 +177,19 @@ def backward_sample_batched(
     ret = np.empty((N, P, D), dtype=np.int32)
 
     # Step 0
-    p = np.exp(gamma[N - 1] - logsumexp(gamma[N - 1]))  # [P]
-    p = p.astype(np.float64)
-    p /= np.sum(p)  # Normalize to ensure it sums to 1
-    j = rng_np.choice(P, size=P, replace=True, p=p)
+    key, subkey = jax.random.split(key)
+    j = gsm(gamma[N - 1], subkey)  # Sample indices using Gumbel softmax
     ret[0] = alpha[N - 1, j]
-    n1 = jnp.asarray(ret[0], dtype=jnp.int32)  # [P, D]
+    n1 = np.asarray(ret[0], dtype=jnp.int32)  # [P, D]
 
     # steps 1, ..., N
     for i in range(1, N):
         s_t = s[N - i - 1]
         p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
         p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
-        # logpmf(n1, 2 * N_E, p_prime)
-        # log_w += binom_logpmf_cupy(n1, 2 * N_E, p_prime).sum(axis=1)
-        log_w = gamma[N - 1 - i] + jax.scipy.stats.binom.logpmf(
-            n1, 2 * N_E, p_prime
-        ).sum(axis=1)
+        log_w = gamma[N - 1 - i] + scipy.stats.binom.logpmf(n1, 2 * N_E, p_prime).sum(
+            axis=1
+        )
         key, subkey = jax.random.split(key)
         j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
         ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
