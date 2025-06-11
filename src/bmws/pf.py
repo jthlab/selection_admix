@@ -2,10 +2,13 @@
 
 import math
 
+import cupy
+import cupyx
 import numba
 import numpy as np
 from numba import config, cuda, njit, objmode, prange, vectorize
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
+from scipy.special import logsumexp
 
 config.CUDA_ENABLE_PYNVJITLINK = 1
 
@@ -37,43 +40,6 @@ def logsumexp(a):
     if np.isneginf(a_max):
         return a_max
     return a_max + np.log(np.sum(np.exp(a - a_max)))
-
-
-@cuda.jit
-def gumbel_max_resample_kernel(log_weights, rng_states, inds):
-    """Each thread samples one index via Gumbel-max over log_weights."""
-    tid = cuda.grid(1)
-    P = log_weights.shape[0]
-
-    if tid < P:
-        max_val = float("-inf")
-        max_idx = -1
-        for j in range(P):
-            u = xoroshiro128p_uniform_float32(rng_states, tid)
-            g = -math.log(-math.log(u))  # Gumbel(0,1)
-            val = log_weights[j] + g
-            if val > max_val:
-                max_val = val
-                max_idx = j
-        inds[tid] = max_idx
-
-
-def gumbel_max_resample(log_weights: np.ndarray, seed: int) -> np.ndarray:
-    P = log_weights.shape[0]
-    threads_per_block = 64
-    blocks = (P + threads_per_block - 1) // threads_per_block
-
-    # Allocate on device
-    d_log_weights = cuda.to_device(log_weights.astype(np.float32))
-    d_inds = cuda.to_device(np.arange(P, dtype=np.int32))
-    rng_states = create_xoroshiro128p_states(P, seed=seed)
-
-    # Launch
-    gumbel_max_resample_kernel[blocks, threads_per_block](
-        d_log_weights, rng_states, d_inds
-    )
-
-    return d_inds.copy_to_host()
 
 
 @njit(parallel=True)
@@ -115,7 +81,7 @@ def xlog1py(x, y):
     return np.where((x == 0.0) & (y == -1.0), 0.0, x * np.log1p(y))
 
 
-@njit(parallel=True)
+@njit(parallel=True, cache=True)
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
 ):
@@ -186,27 +152,63 @@ def forward_filter(
     gamma[ell] = log_weights
 
 
-@njit(nogil=True)
-def backward_sample(alpha, s, seed, N_E):
-    n, p, d = alpha.shape
-    ret = np.full((n, d), np.nan)
-    log_weights = np.empty(p)
-    g = np.random.gumbel(0.0, 1.0, p)
-    ind = np.argmax(g + log_weights)
-    ret[0] = alpha[-1, ind]
-    for i in range(1, n):
-        x = 2 * N_E * expit(ret[i - 1])
-        for j in range(p):
-            logit_p_prime = alpha[-(i + 1), j] + np.log1p(s[-i] / 2)
-            log_weights[j] = np.sum(binom_logpmf(x, 2 * N_E, logit_p_prime))
-        g = np.random.gumbel(0.0, 1.0, p)
-        ind = np.argmax(g + log_weights)
-        ret[i] = alpha[-(i + 1), ind]
-    return ret
+def backward_sample_batched(
+    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
+) -> np.ndarray:
+    # alpha: (N, P, D)
+    # gamma: (N, P)
+    alpha_c = cupy.asarray(alpha, dtype=cupy.int32)
+    gamma_c = cupy.asarray(gamma, dtype=cupy.float32)
+    s = cupy.asarray(s)
+    rng_np = np.random.default_rng(seed)
+    cupy.random.seed(seed)
+
+    N, P, D = alpha.shape
+    ret = np.empty((N, P, D), dtype=np.int32)
+
+    # Step 0
+    p = np.exp(gamma[N - 1] - logsumexp(gamma[N - 1]))  # [P]
+    p = p.astype(np.float64)
+    p /= np.sum(p)  # Normalize to ensure it sums to 1
+    j = rng_np.choice(P, size=P, replace=True, p=p)
+    ret[0] = alpha[N - 1, j]
+    n1 = cupy.asarray(ret[0], dtype=cupy.int32)  # [P, D]
+
+    # steps 1, ..., N
+    for i in range(1, N):
+        s_t = s[N - i - 1]
+        log_w = gamma_c[N - 1 - i]
+        p0 = alpha_c[N - 1 - i] / 2 / N_E  # [P, D]
+        p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
+        # logpmf(n1, 2 * N_E, p_prime)
+        log_w += binom_logpmf_cupy(n1, 2 * N_E, p_prime).sum(axis=1)
+        G = cupy.random.gumbel(0.0, 1.0, size=(P, P))
+        j = cupy.argmax(G + log_w[:, None], axis=1)
+        n1 = alpha_c[N - 1 - i, j]  # [P, D]
+        ret[i] = n1.get()
+
+    return ret.transpose(
+        (1, 0, 2)
+    )  # Return shape (P, N, D) for consistency with the original code
 
 
 MAX_N = 400
 MAX_D = 4
+
+
+def binom_logpmf_cupy(x, n, p):
+    """
+    Compute the log PMF of a binomial distribution.
+    x: number of successes
+    n: number of trials
+    p: probability of success
+    """
+    lgamma = cupyx.scipy.special.gammaln
+    log_p = cupy.log(p)
+    log_q = cupy.log1p(-p)
+    return (
+        lgamma(n + 1) - lgamma(x + 1) - lgamma(n - x + 1) + x * log_p + (n - x) * log_q
+    )
 
 
 def _binom_logpmf(x, n, p):
@@ -286,8 +288,8 @@ def backward_sample_kernel(alpha, gamma, s, N_E, ret, rng_states):
             ret[b, i, k] = shared_ret[i, k]
 
 
-def backward_sample_batched(
-    alpha, gamma, s: np.ndarray, N_E: int, B: int, seed: int = 0
+def backward_sample_batched0(
+    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
 ) -> np.ndarray:
     """
     Sample B backward trajectories using the CUDA kernel.
@@ -306,6 +308,7 @@ def backward_sample_batched(
     assert N <= MAX_N
     assert D <= MAX_D
     threads_per_block = 64
+    B = P
     blocks = (B + threads_per_block - 1) // threads_per_block
 
     # Allocate device memory
@@ -348,11 +351,28 @@ def test_bwd_sample():
     # Test the backward sampling algorithm
     obs = np.array([0, 1, 1, 0, 1])
     thetas = np.array([[0.5, 0.5], [0.6, 0.4], [0.7, 0.3], [0.8, 0.2], [0.9, 0.1]])
-    s = np.array([[1, 0], [0, 1], [1, 1], [0, 0], [1, 1]])
+    s = np.random.uniform(-0.1, 0.1, (5, 2))
     t = np.array([0, 1, 2, 3, 4])
-    pi = np.random.beta(1, 100, (10_000, 2))
-    seed = 42
+    N_E = 10_000
+    particles = (2 * N_E * np.random.beta(1, 100, (10_000, 2))).astype(int)
+    log_weights = np.full((10_000,), -math.log(10_000), dtype=np.float32)
+    alpha = np.zeros((5, 10_000, 2), dtype=np.int32)
+    gamma = np.zeros((5, 10_000), dtype=np.float32)
+    ref_path = np.zeros((5, 2), dtype=np.int32)
     ll_out = np.zeros(1)
-    alpha = forward_filter(obs, thetas, s, t, pi, seed, ll_out, N_E=1e4)
-    ret = backward_sample_batched(alpha, s, 1e4, 10_000, 1)
+    forward_filter(
+        obs,
+        thetas,
+        s,
+        t,
+        particles,
+        log_weights,
+        ref_path,
+        alpha,
+        gamma,
+        ll=ll_out,
+        N_E=N_E,
+        seed=1,
+    )
+    ret = backward_sample_batched(alpha, gamma, s, N_E, 1)
     print(ret)

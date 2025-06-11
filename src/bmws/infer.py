@@ -128,9 +128,7 @@ def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
         N_E,
         get_seed(),
     )
-    paths = backward_sample_batched(
-        alpha, gamma, sln(t_diff), N_E, num_paths, get_seed()
-    )
+    paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, get_seed())
     mean_paths[:] = paths[0]
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
