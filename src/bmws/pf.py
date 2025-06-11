@@ -2,15 +2,12 @@
 
 import math
 
-import cupy
-import cupyx
+import jax
+import jax.numpy as jnp
 import numba
 import numpy as np
-from numba import config, cuda, njit, objmode, prange, vectorize
-from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
+from numba import njit, prange
 from scipy.special import logsumexp
-
-config.CUDA_ENABLE_PYNVJITLINK = 1
 
 
 @njit
@@ -152,16 +149,25 @@ def forward_filter(
     gamma[ell] = log_weights
 
 
+@jax.jit
+def gsm(log_w, key):
+    """
+    Gumbel softmax sampling.
+    log_w: [P] array of log weights
+    Returns: [P] array of sampled indices
+    """
+    P = log_w.shape[0]
+    G = jax.random.gumbel(key, shape=(P, P))
+    return jnp.argmax(G + log_w, axis=0)
+
+
 def backward_sample_batched(
     alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
 ) -> np.ndarray:
     # alpha: (N, P, D)
     # gamma: (N, P)
-    alpha_c = cupy.asarray(alpha, dtype=cupy.int32)
-    gamma_c = cupy.asarray(gamma, dtype=cupy.float32)
-    s = cupy.asarray(s)
+    key = jax.random.key(seed)
     rng_np = np.random.default_rng(seed)
-    cupy.random.seed(seed)
 
     N, P, D = alpha.shape
     ret = np.empty((N, P, D), dtype=np.int32)
@@ -172,20 +178,21 @@ def backward_sample_batched(
     p /= np.sum(p)  # Normalize to ensure it sums to 1
     j = rng_np.choice(P, size=P, replace=True, p=p)
     ret[0] = alpha[N - 1, j]
-    n1 = cupy.asarray(ret[0], dtype=cupy.int32)  # [P, D]
+    n1 = jnp.asarray(ret[0], dtype=jnp.int32)  # [P, D]
 
     # steps 1, ..., N
     for i in range(1, N):
         s_t = s[N - i - 1]
-        log_w = gamma_c[N - 1 - i]
-        p0 = alpha_c[N - 1 - i] / 2 / N_E  # [P, D]
+        p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
         p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
         # logpmf(n1, 2 * N_E, p_prime)
-        log_w += binom_logpmf_cupy(n1, 2 * N_E, p_prime).sum(axis=1)
-        G = cupy.random.gumbel(0.0, 1.0, size=(P, P))
-        j = cupy.argmax(G + log_w[:, None], axis=1)
-        n1 = alpha_c[N - 1 - i, j]  # [P, D]
-        ret[i] = n1.get()
+        # log_w += binom_logpmf_cupy(n1, 2 * N_E, p_prime).sum(axis=1)
+        log_w = gamma[N - 1 - i] + jax.scipy.stats.binom.logpmf(
+            n1, 2 * N_E, p_prime
+        ).sum(axis=1)
+        key, subkey = jax.random.split(key)
+        j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
+        ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
 
     return ret.transpose(
         (1, 0, 2)
@@ -238,10 +245,10 @@ def _binom_logpmf(x, n, p):
 
 
 binom_logpmf = njit(_binom_logpmf, cache=True)
-binom_logpmf_gpu = cuda.jit(device=True)(_binom_logpmf)
+# binom_logpmf_gpu = cuda.jit(device=True)(_binom_logpmf)
 
 
-@cuda.jit(cache=True)
+# @cuda.jit(cache=True)
 def backward_sample_kernel(alpha, gamma, s, N_E, ret, rng_states):
     b = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     B = ret.shape[0]
