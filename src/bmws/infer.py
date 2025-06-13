@@ -12,21 +12,14 @@ import jaxopt
 import numpy as np
 import optimistix as optx
 import tqdm
-from jax import jit, lax, vmap
+from jax import grad, jit, lax, vmap
 
 import bmws.data
 
 from .data import Dataset
 from .flsa import flsa
 from .pf import backward_sample_batched, forward_filter
-
-
-@contextmanager
-def timed(msg="Elapsed"):
-    start = timeit.default_timer()
-    yield
-    end = timeit.default_timer()
-    print(f"{msg}: {end - start:.6f}s")
+from .timer import timer
 
 
 @jax.tree_util.register_dataclass
@@ -214,35 +207,35 @@ def gibbs(
 
     beta = alpha
 
-    # run warmup once
-    def logdensity(x):
-        return -obj(x, (alpha, beta, paths, t))
-
-    # HMC
-    warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
-    key, warmup_key, sample_key = jax.random.split(key, 3)
-    (state, warmup_parameters), _ = warmup.run(warmup_key, sln, num_steps=1000)
-
     # a, b such that gamma with mean=alpha and variance=sqrt alpha
     # a*b = alpha
     # a*b**2 = sqrt(alpha)
     # alpha*b = sqrt(alpha) => b=1/sqrt(alpha)
     prior_a = prior_b = jnp.sqrt(alpha)
 
+    @timer
     @jit
     def step(sln, alpha, beta, paths, t, key):
         def logdensity(x):
             return -obj(x, (alpha, beta, paths, t))
 
-        nuts = blackjax.nuts(logdensity, **warmup_parameters)
-        state = nuts.init(sln)
+        # HMC
+        warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+        key, warmup_key, sample_key = jax.random.split(key, 3)
+        (state, warmup_parameters), _ = warmup.run(warmup_key, sln, num_steps=1000)
+
+        df = grad(logdensity)(sln)
+        C = jax.tree.reduce(max, jax.tree.map(jnp.max, df))
+
+        mcmc = blackjax.nuts(logdensity, **warmup_parameters)
+        state = mcmc.init(sln)
 
         def body(state, key):
-            state, _ = nuts.step(key, state)
-            return state, None
+            return mcmc.step(key, state)
 
         key0, key1, key2 = jax.random.split(key, 3)
-        last_state, _ = lax.scan(body, state, jax.random.split(key0, 100))
+        last_state, info = lax.scan(body, state, jax.random.split(key0, 100))
+        jax.debug.print("{}", info.acceptance_rate)
         # sample alpha conditionally
         a = prior_a + sln.M / 2
         b_alpha = prior_b + sln.roughness() / 2
