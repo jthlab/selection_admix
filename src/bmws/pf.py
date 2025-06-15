@@ -122,6 +122,7 @@ def forward_filter(
             p = particles / 2 / N_E
             s_t = s[t[i]]
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
+            p_prime = np.clip(p_prime, 0, 1)
             for j in prange(P):
                 for k in range(D):
                     if particles[j, k] > 0 and particles[j, k] < 2 * N_E:
@@ -191,26 +192,27 @@ def backward_sample_batched(
     #     s_t = s[N - i - 1]
     #     p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
     #     p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
+    #     p_prime = np.clip(p_prime, 0, 1)
     #     u = gamma[N - 1 - i]
-    #     v = scipy.stats.binom.logpmf(n1[None, :], 2 * N_E, p_prime[:, None]).sum(axis=2)
+    #     v = jax.scipy.stats.binom.logpmf(n1[None, :], 2 * N_E, p_prime[:, None]).sum(axis=2)
     #     log_w = u[:, None] + v
     #     key, subkey = jax.random.split(key)
     #     j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
     #     ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
     #     if np.any((ret[i] == 0) & (ret[i - 1] != 0)) or np.any(
     #         (ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E)
-    #     ):
+    #     ) or ret[i].max() > 2 * N_E or ret[i].min() < 0:
     #         k = np.nonzero(
     #             ((ret[i] == 0) & (ret[i - 1] != 0)) | ((ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E))
     #         )
     #         breakpoint()
     #         raise ValueError("Invalid state transition detected")
-
     def body(accum, tup):
         n1, key = accum
         s_t, alph, gam = tup
         p0 = alph / 2 / N_E  # [P, D]
         p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
+        p_prime = jnp.clip(p_prime, 0, 1)
         log_w = gam[:, None] + jax.scipy.stats.binom.logpmf(
             n1[None, :], 2 * N_E, p_prime[:, None]
         ).sum(axis=2)
@@ -228,8 +230,64 @@ def backward_sample_batched(
     )  # Return shape (P, N, D) for consistency with the original code
 
 
-MAX_N = 400
-MAX_D = 4
+@timer
+@jax.jit
+def backward_sample_batched(
+    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
+) -> np.ndarray:
+    # alpha: (N, P, D)
+    # gamma: (N, P)
+    key = jax.random.key(seed)
+
+    N, P, D = alpha.shape
+
+    # Step 0
+    key, subkey = jax.random.split(key)
+    j = gsm(gamma[N - 1], subkey)  # Sample indices using Gumbel softmax
+    ret0 = alpha[N - 1, j]
+
+    # # steps 1, ..., N
+    # for i in range(1, N):
+    #     s_t = s[N - i - 1]
+    #     p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
+    #     p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
+    #     p_prime = np.clip(p_prime, 0, 1)
+    #     u = gamma[N - 1 - i]
+    #     v = jax.scipy.stats.binom.logpmf(n1[None, :], 2 * N_E, p_prime[:, None]).sum(axis=2)
+    #     log_w = u[:, None] + v
+    #     key, subkey = jax.random.split(key)
+    #     j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
+    #     ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
+    #     if np.any((ret[i] == 0) & (ret[i - 1] != 0)) or np.any(
+    #         (ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E)
+    #     ) or ret[i].max() > 2 * N_E or ret[i].min() < 0:
+    #         k = np.nonzero(
+    #             ((ret[i] == 0) & (ret[i - 1] != 0)) | ((ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E))
+    #         )
+    #         breakpoint()
+    #         raise ValueError("Invalid state transition detected")
+
+    def body(accum, tup):
+        n1, key = accum
+        s_t, alph, gam = tup
+        p0 = alph / 2 / N_E  # [P, D]
+        p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
+        p_prime = jnp.clip(p_prime, 0, 1)
+        log_w = gam[:, None] + jax.scipy.stats.binom.logpmf(
+            n1[None, :], 2 * N_E, p_prime[:, None]
+        ).sum(axis=2)
+        key, subkey = jax.random.split(key)
+        j = gsm(log_w, subkey)
+        n1 = alph[j]
+        return (n1, key), n1
+
+    ret1 = jax.lax.scan(
+        body, (ret0, key), (s[:-1], alpha[:-1], gamma[:-1]), reverse=True
+    )[1][::-1]
+    ret = jnp.concatenate([ret0[None], ret1])
+    return ret.transpose(
+        (1, 0, 2)
+    )  # Return shape (P, N, D) for consistency with the original code
 
 
 def binom_logpmf_cupy(x, n, p):

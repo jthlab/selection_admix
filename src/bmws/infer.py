@@ -1,7 +1,9 @@
+import os
 import timeit
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 import blackjax
 import gnuplotlib as gp
@@ -11,8 +13,8 @@ import jax.numpy as jnp
 import jaxopt
 import numpy as np
 import optimistix as optx
-import tqdm
 from jax import grad, jit, lax, vmap
+from rich.progress import Progress
 
 import bmws.data
 
@@ -204,6 +206,9 @@ def gibbs(
     paths, t, ll = sample_paths(
         sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
     )
+    if (paths < 0).any() or (paths > 2 * N_E).any():
+        breakpoint()
+        raise ValueError("Paths contain invalid values.")
 
     beta = alpha
 
@@ -220,21 +225,23 @@ def gibbs(
             return -obj(x, (alpha, beta, paths, t))
 
         # HMC
-        warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
-        key, warmup_key, sample_key = jax.random.split(key, 3)
-        (state, warmup_parameters), _ = warmup.run(warmup_key, sln, num_steps=1000)
+        # warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+        # key, warmup_key, sample_key = jax.random.split(key, 3)
+        # (state, warmup_parameters), _ = warmup.run(warmup_key, sln, num_steps=1000)
 
         df = grad(logdensity)(sln)
-        C = jax.tree.reduce(max, jax.tree.map(jnp.max, df))
+        infnorm = partial(jnp.linalg.norm, ord=jnp.inf)
+        C = jax.tree.reduce(max, jax.tree.map(infnorm, df))
 
-        mcmc = blackjax.nuts(logdensity, **warmup_parameters)
+        # mcmc = blackjax.nuts(logdensity, **warmup_parameters)
+        mcmc = blackjax.mala(logdensity, 1e-3 / C)
         state = mcmc.init(sln)
 
         def body(state, key):
             return mcmc.step(key, state)
 
         key0, key1, key2 = jax.random.split(key, 3)
-        last_state, info = lax.scan(body, state, jax.random.split(key0, 100))
+        last_state, info = lax.scan(body, state, jax.random.split(key0, 2))
         jax.debug.print("{}", info.acceptance_rate)
         # sample alpha conditionally
         a = prior_a + sln.M / 2
@@ -248,42 +255,50 @@ def gibbs(
     lls = []
     last_lls = None
     ret = []
-    for i in tqdm.trange(niter):
-        assert prior[0].shape == (NUM_PARTICLES, data.K)
-        key, subkey = jax.random.split(key)
-        paths, t, ll = sample_paths(
-            sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
-        )
-        lls = np.append(lls, ll)
-        # since time runs backwards (see above) paths[:, 0]
-        # is the distribution at the most ancient time point
-        prior = (
-            paths[:, 0],
-            np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
-        )
-        p = paths.mean(0) / 2 / N_E
-        # gp.plot(
-        #     *[(t[::-1], y[::-1]) for y in p.T],
-        #     _with="lines",
-        #     title="afs",
-        #     terminal="dumb 120,30",
-        #     unset="grid",
-        # )
-        key, subkey = jax.random.split(key)
-        sln, alpha, beta = step(
-            sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
-        )
-        s = sln(t[:-1])
-        # gp.plot(
-        #     *[(t[::-1][:-1], y[::-1]) for y in s.T],
-        #     _with="lines",
-        #     title="selection",
-        #     terminal="dumb 120,30",
-        #     unset="grid",
-        # )
-        # print(lls)
-        # print(f"{sln.roughness()=} {alpha=} {beta=}")
-        ret.append((sln, paths[0]))
+    with Progress() as progress:
+        task = progress.add_task("MCMC...", total=niter)
+        for i in range(niter):
+            assert prior[0].shape == (NUM_PARTICLES, data.K)
+            key, subkey = jax.random.split(key)
+            paths, t, ll = sample_paths(
+                sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
+            )
+            lls = np.append(lls, ll)
+            # since time runs backwards (see above) paths[:, 0]
+            # is the distribution at the most ancient time point
+            prior = (
+                paths[:, 0],
+                np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
+            )
+            p = paths.mean(0) / 2 / N_E
+            # gp.plot(
+            #     *[(t[::-1], y[::-1]) for y in p.T],
+            #     _with="lines",
+            #     title="afs",
+            #     terminal="dumb 120,30",
+            #     unset="grid",
+            # )
+            key, subkey = jax.random.split(key)
+            sln, alpha, beta = step(
+                sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
+            )
+            s = sln(t[:-1])
+            # gp.plot(
+            #     *[(t[::-1][:-1], y[::-1]) for y in s.T],
+            #     _with="lines",
+            #     title="selection",
+            #     terminal="dumb 120,30",
+            #     unset="grid",
+            # )
+            # print(lls)
+            # print(f"{sln.roughness()=} {alpha=} {beta=}")
+            ret.append((sln, paths[0]))
+            # check if /tmp/break exists, break if so, and delete the file
+            if os.path.exists("/tmp/break"):
+                breakpoint()
+                os.remove("/tmp/break")
+            print(sln)
+            progress.update(task, advance=1)
 
     slns, paths = zip(*ret)
     return (slns, paths)
