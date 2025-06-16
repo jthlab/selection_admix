@@ -271,25 +271,27 @@ def gibbs(
                 np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
             )
             p = paths.mean(0) / 2 / N_E
-            # gp.plot(
-            #     *[(t[::-1], y[::-1]) for y in p.T],
-            #     _with="lines",
-            #     title="afs",
-            #     terminal="dumb 120,30",
-            #     unset="grid",
-            # )
+            gp.plot(
+                *[(t[::-1], y[::-1]) for y in p.T],
+                _with="lines",
+                title="afs",
+                yrange=(0.0, 1.0),
+                terminal="dumb 120,30",
+                unset="grid",
+            )
             key, subkey = jax.random.split(key)
             sln, alpha, beta = step(
                 sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
             )
             s = sln(t[:-1])
-            # gp.plot(
-            #     *[(t[::-1][:-1], y[::-1]) for y in s.T],
-            #     _with="lines",
-            #     title="selection",
-            #     terminal="dumb 120,30",
-            #     unset="grid",
-            # )
+            gp.plot(
+                *[(t[::-1][:-1], y[::-1]) for y in s.T],
+                _with="lines",
+                title="selection",
+                yrange=(-0.1, 0.1),
+                terminal="dumb 120,30",
+                unset="grid",
+            )
             # print(lls)
             # print(f"{sln.roughness()=} {alpha=} {beta=}")
             ret.append((sln, paths[0]))
@@ -297,7 +299,6 @@ def gibbs(
             if os.path.exists("/tmp/break"):
                 breakpoint()
                 os.remove("/tmp/break")
-            print(sln)
             progress.update(task, advance=1)
 
     slns, paths = zip(*ret)
