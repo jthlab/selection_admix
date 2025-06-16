@@ -2,6 +2,7 @@
 
 import math
 
+import cupy as cp
 import jax
 import jax.numpy as jnp
 import numba
@@ -81,7 +82,6 @@ def xlog1py(x, y):
 
 
 @timer
-@njit(parallel=True, cache=True)
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
 ):
@@ -101,6 +101,7 @@ def forward_filter(
     ell = 0
     weights_are_uniform = False
     inds = np.empty(P, dtype=np.int32)
+    cp.random.seed(seed)
     for i in range(N):
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
@@ -123,14 +124,17 @@ def forward_filter(
             s_t = s[t[i]]
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
             p_prime = np.clip(p_prime, 0, 1)
-            for j in prange(P):
-                for k in range(D):
-                    if particles[j, k] > 0 and particles[j, k] < 2 * N_E:
-                        # sampling not necessary if fixed. also small numerical errors
-                        # can cause p_prime \notin [0, 1]
-                        particles[j, k] = random_binomial_large_N(
-                            2 * N_E, p_prime[j, k]
-                        )
+
+            particles[:] = cp.random.binomial(2 * N_E, p_prime)
+
+            # for j in prange(P):
+            #     for k in range(D):
+            #         if particles[j, k] > 0 and particles[j, k] < 2 * N_E:
+            #             # sampling not necessary if fixed. also small numerical errors
+            #             # can cause p_prime \notin [0, 1]
+            #             particles[j, k] = random_binomial_large_N(
+            #                 2 * N_E, p_prime[j, k]
+            #             )
 
             particles[0] = ref_path[t[i]]
 

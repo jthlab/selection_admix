@@ -8,7 +8,7 @@ def timer(fn: Callable) -> Callable:
     def wrapper(*args, **kwargs) -> Any:
         start = time.time()
         result = fn(*args, **kwargs)
-        return result
+        # return result
         end = time.time()
         print(f"{fn.__name__} ran in {end - start:.4f} seconds")
         return result

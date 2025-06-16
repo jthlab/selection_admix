@@ -41,6 +41,7 @@ dependencies = [
     "interpax>=0.3.8",
     "blackjax>=1.2.5",
     "rich>=14.0.0",
+    "cupy-cuda12x>=13.4.1",
 ]
 requires-python = ">=3.12"
 readme = "README.md"
