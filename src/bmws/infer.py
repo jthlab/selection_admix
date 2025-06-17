@@ -20,7 +20,7 @@ import bmws.data
 
 from .data import Dataset
 from .flsa import flsa
-from .pf import backward_sample_batched, forward_filter
+from .pf import backward_sample_pgas_batched, forward_filter
 from .timer import timer
 
 
@@ -100,6 +100,7 @@ def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
     T = len(t_diff)
     alpha = np.zeros((T, P, K), dtype=np.int32)
     gamma = np.zeros((T, P), dtype=np.float32)
+    ancestors = np.zeros((T, P), dtype=np.int32)
     # have to convert to np.array because of buffer protocol stuff
     ll = np.zeros(1)
     theta = data.theta.clip(1e-5, 1 - 1e-5)
@@ -119,11 +120,13 @@ def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
         ),
         alpha,
         gamma,
+        ancestors,
         ll,
         N_E,
         get_seed(),
     )
-    paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, get_seed())
+    # paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, get_seed())
+    paths = backward_sample_pgas_batched(alpha, gamma, ancetors, sln(t_diff), N_E, get_seed())
     mean_paths[:] = paths[0]
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)

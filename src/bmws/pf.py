@@ -133,7 +133,7 @@ from line_profiler import profile
 
 @timer
 def forward_filter(
-    obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
+    obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ancestors, ll, N_E, seed
 ):
     """
     Forward algorithm for the particle filter.
@@ -160,12 +160,14 @@ def forward_filter(
     cs = cp.asarray(s)
     calpha = cp.empty_like(alpha)
     cgamma = cp.empty_like(gamma)
+    cinds = cp.empty_like(inds)
 
     for i in range(N):
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
         if is_transition:
             # resample if ess is too low
+            inds = cp.arange(P)
             if not weights_are_uniform:
                 log_weights -= cupyx.scipy.special.logsumexp(log_weights)
                 # log_weights -= jax.scipy.special.logsumexp(log_weights)
@@ -184,10 +186,12 @@ def forward_filter(
                     particles = particles[inds]
                     log_weights[:] = -np.log(P)  # Reset log weights to uniform
                     weights_are_uniform = True
+            
 
             # Save state
             calpha[ell] = particles
             cgamma[ell] = log_weights
+            cinds[ell] = inds
             ell += 1
 
             # Mutation step
@@ -213,6 +217,50 @@ def forward_filter(
 
     alpha[:] = calpha.get()
     gamma[:] = cgamma.get()
+    ancestors[:] = cinds.get()
+
+
+import numpy as np
+from numba import njit, prange
+
+@njit(parallel=True)
+def backward_sample_pgas_batched(alpha, gamma, ancestors, batch_size, seed):
+    """
+    Batched backward sampling with PGAS ancestor tracing using Numba on CPU.
+    alpha: [N, P, D] particles
+    ancestors: [N, P] ancestor indices from forward filter
+    gamma: [N, P] log weights
+    batch_size: number of paths to sample
+    Returns sampled paths: [batch_size, N, D]
+    """
+    np.random.seed(seed)
+    N, P, D = alpha.shape
+    ret = np.empty((batch_size, N, D), dtype=alpha.dtype)
+
+    for b in prange(batch_size):
+        # Normalize log weights at final time
+        max_log_w = np.max(gamma[-1])
+        w = np.exp(gamma[-1] - max_log_w)
+        w /= w.sum()
+
+        # Sample initial index j at final time
+        j = np.random.choice(P, p=w)
+
+        path_indices = np.empty(N, dtype=np.int32)
+        path_indices[-1] = j
+
+        # Trace ancestors backward
+        for i in range(N - 2, -1, -1):
+            j = ancestors[i + 1, j]
+            path_indices[i] = j
+
+        # Gather particles
+        for i in range(N):
+            ret[b, i, :] = alpha[i, path_indices[i], :]
+
+    return ret
+
+
 
 @jax.jit
 def gsm(log_w, key):
@@ -228,7 +276,7 @@ def gsm(log_w, key):
 
 @timer
 def backward_sample_batched(
-    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
+    alpha, gamma, ancestors, s: np.ndarray, N_E: int, seed: int = 0
 ) -> np.ndarray:
     # alpha: (N, P, D)
     # gamma: (N, P)
