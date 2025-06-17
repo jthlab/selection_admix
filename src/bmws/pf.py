@@ -3,6 +3,7 @@
 import math
 
 import cupy as cp
+import cupyx
 import jax
 import jax.numpy as jnp
 import numba
@@ -81,6 +82,55 @@ def xlog1py(x, y):
     return np.where((x == 0.0) & (y == -1.0), 0.0, x * np.log1p(y))
 
 
+logprob_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void fused_logprob(
+    const float* __restrict__ log_theta,
+    const float* __restrict__ x,
+    const int obs,
+    float* __restrict__ out,
+    const int D,
+    const int P
+) {
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if (j >= P) return;
+
+    int offset = j * D;
+    float maxval = -1e20f;
+    float a[5];
+    assert(D <= 5); // Ensure D is small enough for static array
+
+    // First pass: find max
+    for (int d = 0; d < D; ++d) {
+        a[d] = log_theta[d];
+        float xval = x[offset + d];
+        a[d] += (obs == 1) ? logf(xval) : log1pf(-xval);
+        if (a[d] > maxval) maxval = a[d];
+    }
+
+    // Second pass: compute logsumexp
+    float accum = 0.0f;
+    for (int d = 0; d < D; ++d) {
+        accum += expf(a[d] - maxval);
+    }
+
+    out[j] = logf(accum) + maxval;
+}
+''', 'fused_logprob')
+
+def fused_log_p_obs_kernel(log_theta: cp.ndarray, x: cp.ndarray, obs: int) -> cp.ndarray:
+    P, D = x.shape
+    out = cp.empty(P, dtype=cp.float32)
+    threads = 64
+    blocks = (P + threads - 1) // threads
+    log_theta32 = log_theta.astype(cp.float32)
+    x32 = x.astype(cp.float32)
+    logprob_kernel((blocks,), (threads,),
+                   (log_theta32, x32, obs, out, D, P))
+    return out
+
+from line_profiler import profile
+
 @timer
 def forward_filter(
     obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ll, N_E, seed
@@ -102,62 +152,68 @@ def forward_filter(
     weights_are_uniform = False
     inds = np.empty(P, dtype=np.int32)
     cp.random.seed(seed)
+    log_weights = cp.asarray(log_weights)
+    particles = cp.asarray(particles)
+
+    log_thetas = cp.asarray(np.log(thetas))
+    cobs = cp.asarray(obs)
+    cs = cp.asarray(s)
+    calpha = cp.empty_like(alpha)
+    cgamma = cp.empty_like(gamma)
+
     for i in range(N):
         is_transition = (i > 0) and (t[i] != t[i - 1])
 
         if is_transition:
             # resample if ess is too low
-            log_weights -= logsumexp(log_weights)
-            ess = 1.0 / np.sum(np.exp(2 * log_weights))
-            if ess < P / 2:
-                # print("ess", ess, "resampling")
-                resample(particles, log_weights, ll, weights_are_uniform)
-                weights_are_uniform = True
+            if not weights_are_uniform:
+                log_weights -= cupyx.scipy.special.logsumexp(log_weights)
+                # log_weights -= jax.scipy.special.logsumexp(log_weights)
+                ess = 1.0 / cp.sum(cp.exp(2 * log_weights))
+                if ess < P / 2:
+                    # print("ess", ess, "resampling")
+                    # resample(particles, log_weights, ll, weights_are_uniform)
+                    if weights_are_uniform:
+                        inds = np.random.randint(0, P, size=P)
+                    else:
+                        p = cp.exp(log_weights)
+                        p /= p.sum()
+                        inds = cp.random.choice(
+                            P, size=P, p=p, replace=True
+                        )
+                    particles = particles[inds]
+                    log_weights[:] = -np.log(P)  # Reset log weights to uniform
+                    weights_are_uniform = True
 
             # Save state
-            alpha[ell] = particles
-            gamma[ell] = log_weights
+            calpha[ell] = particles
+            cgamma[ell] = log_weights
             ell += 1
 
             # Mutation step
             p = particles / 2 / N_E
-            s_t = s[t[i]]
+            s_t = cs[t[i]]
             p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
-            p_prime = np.clip(p_prime, 0, 1)
+            p_prime = cp.clip(p_prime, 0, 1)
 
-            particles[:] = cp.random.binomial(2 * N_E, p_prime)
-
-            # for j in prange(P):
-            #     for k in range(D):
-            #         if particles[j, k] > 0 and particles[j, k] < 2 * N_E:
-            #             # sampling not necessary if fixed. also small numerical errors
-            #             # can cause p_prime \notin [0, 1]
-            #             particles[j, k] = random_binomial_large_N(
-            #                 2 * N_E, p_prime[j, k]
-            #             )
-
-            particles[0] = ref_path[t[i]]
+            particles = cp.random.binomial(2 * N_E, p_prime)
+            particles = cp.concatenate([cp.asarray(ref_path[t[i]][None]), particles[1:]])
 
         else:
             # Observation step
             x = particles / 2 / N_E
-            log_p_obs = np.log(
-                np.sum(
-                    np.exp(
-                        np.log(thetas[i]) + xlogy(obs[i], x) + xlog1py(1 - obs[i], -x)
-                    ),
-                    axis=1,
-                )
-            )
+            # log_p_obs0 = cupyx.scipy.special.logsumexp(log_thetas[i] + cupyx.scipy.special.xlogy(cobs[i], x) + cupyx.scipy.special.xlog1py(1 - cobs[i], -x), axis=1)
+            log_p_obs = fused_log_p_obs_kernel(log_thetas[i], x, obs[i])
             log_weights += log_p_obs
             weights_are_uniform = False
 
     # Final resample
-    alpha[ell] = particles
-    gamma[ell] = log_weights
+    calpha[ell] = particles
+    cgamma[ell] = log_weights
 
+    alpha[:] = calpha.get()
+    gamma[:] = cgamma.get()
 
-@timer
 @jax.jit
 def gsm(log_w, key):
     """

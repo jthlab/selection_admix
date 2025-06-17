@@ -270,36 +270,37 @@ def gibbs(
                 paths[:, 0],
                 np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
             )
-            p = paths.mean(0) / 2 / N_E
-            gp.plot(
-                *[(t[::-1], y[::-1]) for y in p.T],
-                _with="lines",
-                title="afs",
-                yrange=(0.0, 1.0),
-                terminal="dumb 120,30",
-                unset="grid",
-            )
             key, subkey = jax.random.split(key)
             sln, alpha, beta = step(
                 sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
             )
-            s = sln(t[:-1])
-            gp.plot(
-                *[(t[::-1][:-1], y[::-1]) for y in s.T],
-                _with="lines",
-                title="selection",
-                yrange=(-0.1, 0.1),
-                terminal="dumb 120,30",
-                unset="grid",
-            )
-            # print(lls)
-            # print(f"{sln.roughness()=} {alpha=} {beta=}")
             ret.append((sln, paths[0]))
             # check if /tmp/break exists, break if so, and delete the file
-            if os.path.exists("/tmp/break"):
-                breakpoint()
-                os.remove("/tmp/break")
+            # if os.path.exists("/tmp/break"):
+            #     breakpoint()
+            #     os.remove("/tmp/break")
             progress.update(task, advance=1)
+            if i % 10 == 0:
+                p = paths.mean(0) / 2 / N_E
+                gp.plot(
+                    *[(t[::-1], y[::-1]) for y in p.T],
+                    _with="lines",
+                    title="afs",
+                    yrange=(0.0, 1.0),
+                    terminal="dumb 120,30",
+                    unset="grid",
+                )
+                s = sln(t[:-1])
+                gp.plot(
+                    *[(t[::-1][:-1], y[::-1]) for y in s.T],
+                    _with="lines",
+                    title="selection",
+                    yrange=(-0.1, 0.1),
+                    terminal="dumb 120,30",
+                    unset="grid",
+                )
+            # print(lls)
+            # print(f"{sln.roughness()=} {alpha=} {beta=}")
 
     slns, paths = zip(*ret)
     return (slns, paths)

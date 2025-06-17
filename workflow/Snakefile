@@ -236,7 +236,7 @@ rule analyze:
         slurm_partition="spgpu,gpu",
         slurm_extra="--gpus 1",
         mem="16G",
-    threads: 32
+    threads: 2
     run:
         datasets, snps = load_file(input[0])
         mean_paths = load_file(input[1])
