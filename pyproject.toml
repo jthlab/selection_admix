@@ -42,6 +42,9 @@ dependencies = [
     "blackjax>=1.2.5",
     "rich>=14.0.0",
     "cupy-cuda12x>=13.4.1",
+    "scalene>=1.5.51",
+    "ipdb>=0.13.13",
+    "line-profiler>=4.2.0",
 ]
 requires-python = ">=3.12"
 readme = "README.md"
