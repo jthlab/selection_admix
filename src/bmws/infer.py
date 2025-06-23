@@ -11,6 +11,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import xlogy, xlog1py
 import numpy as np
+import scipy
+import tqdm
 from jax import grad, jit, lax, vmap
 
 import bmws.data
@@ -83,14 +85,9 @@ class PiecewiseSelection:
 Selection = SplineSelection
 
 
-def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key):
-    def get_seed():
-        nonlocal key
-        key, subkey = jax.random.split(key)
-        return int(jax.random.randint(subkey, (), 0, 2**31 - 1))
-
+def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, N_E, key):
+    subkey1, subkey2 = jax.random.split(key)
     particles, log_weights = prior
-    particles[0] = ref_path[0]
     P, D = particles.shape
     alpha, gamma, ancestors = map(
         np.asarray,
@@ -101,21 +98,19 @@ def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key
             particles,
             log_weights,
             ref_path,
-            mean_path,
             N_E,
-            get_seed(),
+            subkey1,
         ),
     )
-    # paths = backward_sample_batched(alpha, gamma, P,get_seed())
+    seed = jax.random.randint(subkey2, (), 0, 2**31 - 1)
+    path = backward_trace(alpha, gamma, ancestors, int(seed))
     p = jax.nn.softmax(gamma)
-    print("H:", -jnp.sum(jax.scipy.special.xlogy(p, p)))
-    alpha, gamma
-    path = backward_trace(alpha, gamma, ancestors, 1, get_seed())
+    print("H={}".format(-scipy.special.xlogy(p, p).sum()))
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
     path = path[::-1]
     ref_path[:] = path
-    return path
+    return path, (alpha, gamma, ancestors)
 
 
 def gibbs(
@@ -124,7 +119,6 @@ def gibbs(
     alpha,
     niter,
     M,
-    mean_paths=None,
     seed=42,
     N_E=1e4,
 ):
@@ -197,26 +191,26 @@ def gibbs(
     # illustration: t = [5, 5, 4, 3, 2, 1, 0, 0, 0]
 
     NUM_PARTICLES = M
-    NUM_PATHS = NUM_PARTICLES
 
     # if not __debug__:
     #     step = jit(step)
 
     key = jax.random.PRNGKey(seed)
-    key, subkey = jax.random.split(key)
     sln = sln0
 
-    if mean_paths is None:
-        mean_paths = bmws.data.bootstrap_paths(data, NUM_PARTICLES)
+    if True:
+        key, subkey = jax.random.split(key)
+        bootstrap_paths = bmws.data.bootstrap_paths(
+            data, NUM_PARTICLES, subkey.tolist()
+        )
     # make time run backwards
-    mean_paths = mean_paths[:, ::-1]
+    bootstrap_paths = bootstrap_paths[:, ::-1]
     bootstrap_paths = (
-        (2 * N_E * mean_paths).astype(np.int32).clip(1, 2 * N_E - 1)
+        (2 * N_E * bootstrap_paths).clip(1, 2 * N_E - 1).astype(np.int32)
     )  # scale to 2 * N_E
     particles = bootstrap_paths[:, 0]
     log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
     ref_path = bootstrap_paths.mean(0).astype(np.int32)
-    mean_path = ref_path.copy()
     assert particles.shape == (NUM_PARTICLES, data.K)
     prior = (particles, log_weights)
 
@@ -236,9 +230,8 @@ def gibbs(
 
     z = jnp.array(z, dtype=np.int32)  # [N, D]
 
-    path = sample_paths(
-        sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
-    )
+    key, subkey = jax.random.split(key)
+    path, _ = sample_paths(sln, prior, z, obs, t, NUM_PARTICLES, ref_path, N_E, subkey)
     beta = alpha
 
     # a, b such that gamma with mean=alpha and variance=sqrt alpha
@@ -281,18 +274,16 @@ def gibbs(
         return last_state.position, alpha, beta
 
     # em loop
-    lls = []
-    last_lls = None
     ret = []
     from contextlib import nullcontext
 
     with nullcontext():  # Progress() as progress:
         # task = progress.add_task("MCMC...", total=niter)
-        for i in range(niter):
+        for i in tqdm.trange(niter):
             assert prior[0].shape == (NUM_PARTICLES, data.K)
             key, subkey = jax.random.split(key)
-            path = sample_paths(
-                sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
+            path, aux = sample_paths(
+                sln, prior, z, obs, t, NUM_PARTICLES, ref_path, N_E, subkey
             )
 
             new_z = []
@@ -309,13 +300,6 @@ def gibbs(
                 new_z.append(I_D[zti])
 
             z = jnp.array(new_z, dtype=np.int32)  # [N, D]
-
-            # since time runs backwards (see above) paths[:, 0]
-            # is the distribution at the most ancient time point
-            # prior = (
-            #     paths[:, 0],
-            #     np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
-            # )
             key, subkey = jax.random.split(key)
             sln, alpha, beta = step(sln, alpha=alpha, beta=beta, path=path, key=subkey)
             ret.append((sln, path, z))
@@ -352,5 +336,5 @@ def gibbs(
             # print(lls)
             # print(f"{sln.roughness()=} {alpha=} {beta=}")
 
-    slns, paths = zip(*ret)
-    return (slns, paths)
+    slns, paths, zs = zip(*ret)
+    return (slns, paths, zs)

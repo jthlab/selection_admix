@@ -8,12 +8,11 @@ import jax.scipy.special as jsp
 import numpy as np
 from numba import njit
 
-from .timer import timer
+
+FWD_DEBUG = False
 
 
-@timer
-@jax.jit
-def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, seed):
+def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
     """
     Forward algorithm for the particle filter.
     obs: observations [T], 0/1 array
@@ -22,31 +21,18 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
     t: [T] time indices
     pi: initial state distribution: particles, log_weights
     """
-    N_E = N_E.astype(int)
+    N_E = jnp.array(N_E).astype(int)
     P, D = particles.shape
     T = len(z)
-    inds = jnp.empty(P, dtype=np.int32)
-    key = jax.random.key(seed)
 
-    # Initialize particles and log weights
-    # y0|x0 ~ prod bernoulli(x0[z]) => x0 ~ beta(2Np, 2N(1-p))
-    key, subkey = jax.random.split(key)
-    n = obs[0, :, 0][:, None]
-    d = obs[0, :, 1][:, None]  # [N, 1]
-    a = 2 * N_E * jnp.sum(n * d * z[0], axis=0) + 1
-    b = 2 * N_E * jnp.sum(n * (1 - d) * z[0], axis=0) + 1
-    particles0 = (
-        jax.random.beta(subkey, a, b, shape=(P - 1, 3)).astype(jnp.int32) * 2 * N_E
-    )
-    particles = jnp.concatenate(
-        [particles0, ref_path[0][None]], axis=0
-    )  # Add reference path
-    log_weights = jnp.full((P,), -jnp.log(P), dtype=jnp.float32)  # uniform log weights
-    alpha0 = particles  # Store initial particles
+    def body(accum, seq):
+        import os
 
-    def body(accum, carry):
-        particles, log_weights = accum
-        t, key = carry
+        if FWD_DEBUG and os.path.exists("/tmp/bodybreak"):
+            breakpoint()
+            os.remove("/tmp/bodybreak")
+        particles, log_weights, key = accum
+        ob_t, rp_t, s_t, z_t = seq
 
         # transition and process observations
         # foll/owing pgas paper
@@ -54,77 +40,129 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         # line 5
         key, subkey = jax.random.split(key)
         inds = jax.random.categorical(subkey, shape=(P - 1,), logits=log_weights)
-
         # line 6
         p = particles / 2 / N_E
-        # p' from _last_ transition
-        p_prime = (1 + s[t - 1] / 2) * p / (1 + s[t - 1] / 2 * p)
-        log_p = log_weights + jax.scipy.stats.binom.logpmf(
-            ref_path[t], 2 * N_E, p_prime
-        ).sum(1)
+        p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
+        p_prime = jnp.clip(p_prime, 0, 1)
+        log_p = log_weights + jax.scipy.stats.binom.logpmf(rp_t, 2 * N_E, p_prime).sum(
+            1
+        )
         key, subkey = jax.random.split(key)
+
+        if FWD_DEBUG:
+            try:
+                assert jnp.isfinite(log_p).any()
+            except AssertionError:
+                breakpoint()
+                pass
+
         J = jax.random.categorical(subkey, logits=log_p)
         inds = jnp.append(inds, J)
 
+        # this is \tilde{x}_{t-1} in paper
         particles = particles[inds]
         p = particles / 2 / N_E  # Update p with resampled particles
 
         # p' from current transition
-        p_prime = (1 + s[t] / 2) * p / (1 + s[t] / 2 * p)
+        p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
+        p_prime = jnp.clip(p_prime, 0, 1)
 
         # line 7
         # p(x_t | x_{t-1}, y_t) proposal distn
         # p(x_t|x_t-1)p(y_t|x_t) \propto (x_t-1 / 2 / N_E)^{x_t} (1 - x_t / 2 / N_E)^{2N_E - x_t}  *
         # use that x / 2NE ->_d beta(2Np, 2N(1-p))
-        n = obs[t, :, 0][:, None]
-        d = obs[t, :, 1][:, None]
-        a_prime = 2 * N_E * p_prime + jnp.sum(n * d * z[t], axis=0) + 1
-        b_prime = 2 * N_E * (1 - p_prime) + jnp.sum(n * (1 - d) * z[t], axis=0) + 1
-        key, *subkeys = jax.random.split(key, 5)
-        p0 = jax.random.beta(subkeys[0], a_prime, b_prime)
-        particles0 = jax.random.binomial(
-            subkeys[1], shape=(P, 3), n=2 * N_E, p=p0
-        ).astype(jnp.int32)
-        particles1 = jax.random.randint(
-            subkeys[2], shape=(P, 3), minval=0, maxval=2 * N_E + 1
-        ).astype(jnp.int32)
-        # line 8
-        eps = 1e-6
-        b = jax.random.bernoulli(subkeys[3], eps, shape=(P, 3))
-        particles = jnp.where(b, particles1, particles0)  # Mix with random particles
-        particles = jnp.concatenate([particles[:-1], ref_path[t][None]])
+        n = ob_t[:, 0][:, None]
+        d = ob_t[:, 1][:, None]
 
-        # line 10
-        p = particles / 2 / N_E
-        r0 = (
-            jax.scipy.stats.binom.logpmf(particles, 2 * N_E, p_prime).sum(1)
-            + jsp.xlogy(n * d * z[t], p[:, None]).sum((1, 2))
-            + jsp.xlog1py(n * (1 - d) * z[t], 1 - p[:, None]).sum((1, 2))
-        )
-        # proposal distn is mixture:
-        # eps * betabinom + (1 - eps) * uniform
-        r10 = jax.scipy.stats.betabinom.logpmf(
-            particles, 2 * N_E, a_prime, b_prime
-        ).sum(1)
-        r11 = -jnp.log(2 * N_E)  # uniform log pmf
-        # r1 = log(a1 * exp(r10) + (1 - a1) * exp(r11))
-        r1 = jnp.logaddexp(r10 + jnp.log(eps), r11 + jnp.log1p(-eps))
+        def f0(key):
+            particles = jax.random.binomial(key, 2 * N_E, p_prime).astype(jnp.int32)
+            particles = jnp.concatenate([particles[:-1], rp_t[None]])
+            log_weights = jnp.full(P, -jnp.log(P))
+            return particles, log_weights
 
-        log_weights = r0 - r1
+        def f1(key):
+            a_prime = 2 * N_E * p_prime + jnp.sum(n * d * z_t, axis=0) + 1
+            b_prime = 2 * N_E * (1 - p_prime) + jnp.sum(n * (1 - d) * z_t, axis=0) + 1
+            key, *subkeys = jax.random.split(key, 5)
+            p0 = jax.random.beta(subkeys[0], a_prime, b_prime)
+            particles0 = jax.random.binomial(
+                subkeys[1], shape=(P, D), n=2 * N_E, p=p0
+            ).astype(jnp.int32)
+            # to maintain absolute continuity, we mix with uniform distribution
+            particles1 = jax.random.randint(
+                subkeys[2], shape=(P, D), minval=0, maxval=2 * N_E + 1
+            ).astype(jnp.int32)
+            eps = 1e-6
+            b = jax.random.bernoulli(subkeys[3], eps, shape=(P, D))
+            particles = jnp.where(
+                b, particles1, particles0
+            )  # Mix with random particles
+            particles = jnp.concatenate([particles[:-1], rp_t[None]])
+
+            # line 10
+            p = particles / 2 / N_E
+            r0 = (
+                jax.scipy.stats.binom.logpmf(particles, 2 * N_E, p_prime).sum(1)
+                + jsp.xlogy(n * d * z_t, p[:, None]).sum((1, 2))
+                + jsp.xlog1py(n * (1 - d) * z_t, 1 - p[:, None]).sum((1, 2))
+            )
+            # proposal distn is mixture:
+            # eps * betabinom + (1 - eps) * uniform
+            r10 = jax.scipy.stats.betabinom.logpmf(
+                particles, 2 * N_E, a_prime, b_prime
+            ).sum(1)
+            r11 = -jnp.log(2 * N_E)  # uniform log pmf
+            # r1 = log(a1 * exp(r10) + (1 - a1) * exp(r11))
+            r1 = jnp.logaddexp(r10 + jnp.log(eps), r11 + jnp.log1p(-eps))
+            log_weights = r0 - r1
+            return particles, log_weights
+
+        key, subkey = jax.random.split(key)
+
+        # if n.sum() = 0, then we can sample directly from p(x[t] | x[t-1])
+
+        if FWD_DEBUG:
+            f = f0 if n.sum() == 0 else f1
+            particles, log_weights = f(subkey)
+
+            try:
+                assert jnp.isfinite(log_weights).any()
+                assert (~jnp.isnan(log_weights)).all()
+            except AssertionError:
+                breakpoint()
+                pass
+        else:
+            particles, log_weights = jax.lax.cond(n.sum() == 0, f0, f1, subkey)
 
         #  line 9
-        return (particles, log_weights), (particles, inds)
+        return (particles, log_weights, key), (particles, inds)
 
-    (particles, log_weights), (alpha, ancestors) = jax.lax.scan(
-        body, (alpha0, log_weights), (jnp.arange(1, T), jax.random.split(key, T - 1))
-    )
+    if FWD_DEBUG:
+        alpha = []
+        ancestors = []
+        for t in range(T):
+            (particles, log_weights, key), (_, inds) = body(
+                (particles, log_weights, key), (obs[t], ref_path[t], s[t], z[t])
+            )
+            alpha.append(particles)
+            ancestors.append(inds)
+    else:
+        (particles, log_weights, _), (alpha, ancestors) = jax.lax.scan(
+            body, (particles, log_weights, key), (obs, ref_path, s, z)
+        )
 
-    alpha = jnp.concatenate([alpha0[None], alpha], axis=0)  # Add initial particles
-    return alpha, log_weights, ancestors
+    alpha = jnp.array(alpha)
+    ancestors = jnp.array(ancestors)
+
+    return alpha, log_weights, ancestors[1:]
+
+
+if not FWD_DEBUG:
+    forward_filter = jax.jit(forward_filter)
 
 
 @njit
-def backward_trace(alpha, gamma, ancestors, batch_size, seed):
+def backward_trace(alpha, gamma, ancestors, seed):
     """
     Batched backward sampling with PGAS ancestor tracing using Numba on CPU.
     alpha: [N, P, D] particles
@@ -135,19 +173,15 @@ def backward_trace(alpha, gamma, ancestors, batch_size, seed):
     """
     np.random.seed(seed)
     N, P, D = alpha.shape
-    ret = np.empty((N, D), dtype=alpha.dtype)
     g = np.random.gumbel(0.0, 1.0, size=P)  # Sample Gumbel noise
     j = np.argmax(gamma + g)  # Sample initial index j at final time
-    path_indices = np.empty(N, dtype=np.int32)
-    path_indices[-1] = j
+    ret = np.empty_like(alpha[:, 0])
+    ret[0] = alpha[N - 1, j]
 
     # Trace ancestors backward
     for i in range(N - 2, -1, -1):
         j = ancestors[i, j]
-        path_indices[i] = j
-
-    for i in range(N):
-        ret[N - i - 1, :] = alpha[i, path_indices[i], :]
+        ret[N - i - 1] = alpha[i, j]
 
     return ret
 
