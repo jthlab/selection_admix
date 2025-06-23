@@ -1,10 +1,8 @@
 import random
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple
 
-import jax
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import statsmodels.api as sm
 from jax import numpy as jnp
 
@@ -59,9 +57,9 @@ class Dataset(NamedTuple):
         T_MIN = min(r["t"] for r in new_records)
         T_MAX = max(r["t"] for r in new_records)
         K = len(new_records[0]["theta"])
-        assert all(
-            len(r["theta"]) == K for r in new_records
-        ), "All records must have the same number of admixture loadings."
+        assert all(len(r["theta"]) == K for r in new_records), (
+            "All records must have the same number of admixture loadings."
+        )
         pi = jnp.ones(K) / K
         dss = []
         for t in range(T_MAX, T_MIN - 1, -1):
@@ -84,10 +82,10 @@ class Dataset(NamedTuple):
         return ret
 
 
-def regression_paths(data: Dataset, num_paths: int):
-    K = data.K
+def bootstrap_paths(data: Dataset, num_paths: int, seed):
     ret = []
     Xt = sm.add_constant(np.arange(data.T).reshape(-1, 1))  # add constant for intercept
+    rng = np.random.default_rng(seed)
     for i in range(data.K):
         x = np.array([int(y) for x, y in zip(data.obs, data.t) if x[0] > 0])
         y = np.array(
@@ -98,7 +96,7 @@ def regression_paths(data: Dataset, num_paths: int):
         )
         preds = []
         for _ in range(num_paths):
-            idx = np.random.choice(len(x), size=len(x), replace=True)
+            idx = rng.choice(len(x), size=len(x), replace=True)
             xb = x[idx]
             yb = y[idx]
             wtsb = wts[idx]
@@ -166,7 +164,7 @@ def regression_plot(data: Dataset):
             upper,
             color="blue",
             alpha=0.2,
-            label=f"{int((1-alpha)*100)}% CI",
+            label=f"{int((1 - alpha) * 100)}% CI",
         )
         ax.set_title(f"Population {i + 1}")
         ax.set_xlabel("Time")
