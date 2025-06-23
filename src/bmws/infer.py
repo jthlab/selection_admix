@@ -1,26 +1,22 @@
 import os
-import timeit
-from collections import Counter
-from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from contextlib import suppress
+from dataclasses import dataclass, field
 from functools import partial
+import sys
 
 import blackjax
 import gnuplotlib as gp
 import interpax
 import jax
 import jax.numpy as jnp
-import jaxopt
+from jax.scipy.special import xlogy, xlog1py
 import numpy as np
-import optimistix as optx
 from jax import grad, jit, lax, vmap
-from rich.progress import Progress
 
 import bmws.data
 
 from .data import Dataset
-from .flsa import flsa
-from .pf import backward_sample_pgas_batched, forward_filter
+from .pf import backward_trace, forward_filter
 from .timer import timer
 
 
@@ -87,51 +83,39 @@ class PiecewiseSelection:
 Selection = SplineSelection
 
 
-def sample_paths(sln, prior, data, num_paths, mean_paths, N_E, key):
+def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key):
     def get_seed():
         nonlocal key
         key, subkey = jax.random.split(key)
         return int(jax.random.randint(subkey, (), 0, 2**31 - 1))
 
-    td = data.t[1:] != data.t[:-1]
-    t_diff = np.r_[data.t[0], data.t[1:][td]]
     particles, log_weights = prior
-    P, K = particles.shape
-    T = len(t_diff)
-    alpha = np.zeros((T, P, K), dtype=np.int32)
-    gamma = np.zeros((T, P), dtype=np.float32)
-    ancestors = np.zeros((T, P), dtype=np.int32)
-    # have to convert to np.array because of buffer protocol stuff
-    ll = np.zeros(1)
-    theta = data.theta.clip(1e-5, 1 - 1e-5)
-    theta /= theta.sum(1, keepdims=True)
-    forward_filter(
-        *map(
-            np.array,
-            (
-                data.obs[:, 1],
-                theta,
-                sln(data.t),
-                data.t,
-                particles,
-                log_weights,
-                mean_paths,
-            ),
+    particles[0] = ref_path[0]
+    P, D = particles.shape
+    alpha, gamma, ancestors = map(
+        np.asarray,
+        forward_filter(
+            z,
+            obs,
+            sln(t),
+            particles,
+            log_weights,
+            ref_path,
+            mean_path,
+            N_E,
+            get_seed(),
         ),
-        alpha,
-        gamma,
-        ancestors,
-        ll,
-        N_E,
-        get_seed(),
     )
-    # paths = backward_sample_batched(alpha, gamma, sln(t_diff), N_E, get_seed())
-    paths = backward_sample_pgas_batched(alpha, gamma, ancetors, sln(t_diff), N_E, get_seed())
-    mean_paths[:] = paths[0]
+    # paths = backward_sample_batched(alpha, gamma, P,get_seed())
+    p = jax.nn.softmax(gamma)
+    print("H:", -jnp.sum(jax.scipy.special.xlogy(p, p)))
+    alpha, gamma
+    path = backward_trace(alpha, gamma, ancestors, 1, get_seed())
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
-    paths = jnp.array(paths)[:, ::-1]
-    return paths, t_diff, ll
+    path = path[::-1]
+    ref_path[:] = path
+    return path
 
 
 def gibbs(
@@ -144,6 +128,31 @@ def gibbs(
     seed=42,
     N_E=1e4,
 ):
+    # organize observations into lists of ragged arrays
+    br = np.where(data.t[1:] != data.t[:-1])[0]
+
+    def f(x):
+        lst = np.array_split(x, br + 1)
+        lst[1:] = [x[1:] for x in lst[1:]]
+        return lst
+
+    obs, thetas = map(f, (data.obs, data.theta))
+    t = np.arange(data.T)[::-1]
+    assert t.shape[0] == len(obs) == len(thetas)
+    padded_obs = []
+    padded_thetas = []
+    N_max = max(len(ob) for ob in obs)
+    for ob, th in zip(obs, thetas):
+        obp, thp = [
+            np.pad(x, [(0, N_max - len(x)), (0, 0)], constant_values=0)
+            for x in (ob, th)
+        ]
+        padded_obs.append(obp)
+        padded_thetas.append(thp)
+
+    obs = np.array(padded_obs, dtype=np.int32)
+    thetas = np.array(padded_thetas, dtype=np.float32)
+
     def binom_logpmf(n, N, p):
         p0 = jnp.isclose(p, 0.0)
         p1 = jnp.isclose(p, 1.0)
@@ -166,7 +175,7 @@ def gibbs(
         return ret.sum()
 
     def obj(sln, args):
-        alpha, beta, paths, t = args
+        alpha, beta, paths = args
         s = sln(t[1:])  # t
 
         @vmap
@@ -198,21 +207,38 @@ def gibbs(
     sln = sln0
 
     if mean_paths is None:
-        mean_paths = bmws.data.mean_paths(data, NUM_PARTICLES)
-
-    particles = (2 * N_E * mean_paths[:, -1]).astype(np.int32)  # scale to 2 * N_E
+        mean_paths = bmws.data.bootstrap_paths(data, NUM_PARTICLES)
+    # make time run backwards
+    mean_paths = mean_paths[:, ::-1]
+    bootstrap_paths = (
+        (2 * N_E * mean_paths).astype(np.int32).clip(1, 2 * N_E - 1)
+    )  # scale to 2 * N_E
+    particles = bootstrap_paths[:, 0]
     log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
-    mean_paths = (2 * N_E * mean_paths.mean(0)).astype(np.int32)
+    ref_path = bootstrap_paths.mean(0).astype(np.int32)
+    mean_path = ref_path.copy()
     assert particles.shape == (NUM_PARTICLES, data.K)
     prior = (particles, log_weights)
 
-    paths, t, ll = sample_paths(
-        sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
-    )
-    if (paths < 0).any() or (paths > 2 * N_E).any():
-        breakpoint()
-        raise ValueError("Paths contain invalid values.")
+    # prepare thetas
+    thetas = [th.clip(1e-5, 1 - 1e-5) for th in thetas]
+    thetas = [th / th.sum(1, keepdims=True) for th in thetas]
 
+    # initialize z to prior
+    z = []
+    D = data.K
+    I_D = np.eye(data.K, dtype=np.int32)
+    for th in thetas:
+        keys = jax.random.split(key, len(th) + 1)
+        key = keys[0]
+        zti = jax.vmap(lambda sk, p: jax.random.choice(sk, D, p=p))(keys[1:], th)
+        z.append(I_D[zti])
+
+    z = jnp.array(z, dtype=np.int32)  # [N, D]
+
+    path = sample_paths(
+        sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
+    )
     beta = alpha
 
     # a, b such that gamma with mean=alpha and variance=sqrt alpha
@@ -223,9 +249,9 @@ def gibbs(
 
     @timer
     @jit
-    def step(sln, alpha, beta, paths, t, key):
+    def step(sln, alpha, beta, path, key):
         def logdensity(x):
-            return -obj(x, (alpha, beta, paths, t))
+            return -obj(x, (alpha, beta, path[None]))
 
         # HMC
         # warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
@@ -258,33 +284,54 @@ def gibbs(
     lls = []
     last_lls = None
     ret = []
-    with Progress() as progress:
-        task = progress.add_task("MCMC...", total=niter)
+    from contextlib import nullcontext
+
+    with nullcontext():  # Progress() as progress:
+        # task = progress.add_task("MCMC...", total=niter)
         for i in range(niter):
             assert prior[0].shape == (NUM_PARTICLES, data.K)
             key, subkey = jax.random.split(key)
-            paths, t, ll = sample_paths(
-                sln, prior, data, NUM_PARTICLES, mean_paths, N_E, subkey
+            path = sample_paths(
+                sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
             )
-            lls = np.append(lls, ll)
+
+            new_z = []
+
+            for zt, pt, th, ob in zip(z, path, thetas, obs):
+                n = ob[:, 0]  # [N]
+                d = ob[:, 1]
+                u = np.sum(n * d, axis=0)  # [N, D]
+                v = np.sum(n * (1 - d), axis=0)
+                x = pt / 2 / N_E
+                log_p = jnp.log(th) + xlogy(u, x) + xlog1py(v, -x)
+                key, subkey = jax.random.split(key)
+                zti = jax.random.categorical(subkey, logits=log_p, axis=1)  # N
+                new_z.append(I_D[zti])
+
+            z = jnp.array(new_z, dtype=np.int32)  # [N, D]
+
             # since time runs backwards (see above) paths[:, 0]
             # is the distribution at the most ancient time point
-            prior = (
-                paths[:, 0],
-                np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
-            )
+            # prior = (
+            #     paths[:, 0],
+            #     np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES), dtype=np.float32),
+            # )
             key, subkey = jax.random.split(key)
-            sln, alpha, beta = step(
-                sln, alpha=alpha, beta=beta, paths=paths, t=t, key=subkey
-            )
-            ret.append((sln, paths[0]))
+            sln, alpha, beta = step(sln, alpha=alpha, beta=beta, path=path, key=subkey)
+            ret.append((sln, path, z))
             # check if /tmp/break exists, break if so, and delete the file
-            # if os.path.exists("/tmp/break"):
-            #     breakpoint()
-            #     os.remove("/tmp/break")
-            progress.update(task, advance=1)
+            if os.path.exists("/tmp/break"):
+                with suppress(FileNotFoundError):
+                    # in case the file is deleted in the meantime
+                    os.remove("/tmp/break")
+                breakpoint()
+            if os.path.exists("/tmp/stop"):
+                with suppress(FileNotFoundError):
+                    os.remove("/tmp/stop")
+                sys.exit(1)
+            # progress.update(task, advance=1)
             if i % 10 == 0:
-                p = paths.mean(0) / 2 / N_E
+                p = path / 2 / N_E
                 gp.plot(
                     *[(t[::-1], y[::-1]) for y in p.T],
                     _with="lines",

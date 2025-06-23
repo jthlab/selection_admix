@@ -2,139 +2,18 @@
 
 import math
 
-import cupy as cp
-import cupyx
 import jax
 import jax.numpy as jnp
-import numba
+import jax.scipy.special as jsp
 import numpy as np
-import scipy
-from numba import njit, prange
+from numba import njit
 
 from .timer import timer
 
 
-@njit
-def random_binomial_large_N(n, p):
-    if p == 0.0:
-        return 0
-    if p == 1.0:
-        return n
-    if p * n < 10.0:
-        return np.random.poisson(n * p)
-    elif p * n > n - 10.0:
-        return n - np.random.poisson(n * (1 - p))
-    z = np.random.normal(n * p, np.sqrt(n * p * (1 - p)))
-    k = np.rint(z)
-    # rarely, the gaussian sample can be outside the range [0, n]
-    k = np.minimum(k, n)
-    k = np.maximum(k, 0)
-    return k
-
-
-@njit(parallel=True)
-def logsumexp(a):
-    """
-    Numerically stable logsumexp function.
-    """
-    a_max = np.max(a)
-    if np.isneginf(a_max):
-        return a_max
-    return a_max + np.log(np.sum(np.exp(a - a_max)))
-
-
-@njit(parallel=True)
-def resample(
-    particles: np.ndarray,
-    log_weights: np.ndarray,
-    ll: np.ndarray,
-    weights_are_uniform: bool = False,
-) -> None:
-    """
-    Resample particles according to their log weights.
-    particles: [P, D] array of particles
-    log_weights: [P] array of log weights
-    ll: [1] array to accumulate log likelihood
-    """
-    (P, D) = particles.shape
-    p0 = np.copy(particles[0])  # Save the first particle
-    lse = logsumexp(log_weights)
-    ll[0] += lse - np.log(P)
-    if weights_are_uniform:
-        inds = np.random.randint(0, P, size=P)
-    else:
-        weights = np.exp(log_weights - lse)
-        w_cs = np.cumsum(weights)
-        U = np.random.rand(P)
-        inds = np.searchsorted(w_cs, U, side="left")
-    particles[:] = particles[inds]
-    particles[0] = p0  # Restore the first particle
-    log_weights[:] = -np.log(P)  # Reset log weights to uniform
-
-
-@njit(parallel=True)
-def xlogy(x, y):
-    return np.where((x == 0.0) & (y == 0.0), 0.0, x * np.log(y))
-
-
-@njit(parallel=True)
-def xlog1py(x, y):
-    return np.where((x == 0.0) & (y == -1.0), 0.0, x * np.log1p(y))
-
-
-logprob_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void fused_logprob(
-    const float* __restrict__ log_theta,
-    const float* __restrict__ x,
-    const int obs,
-    float* __restrict__ out,
-    const int D,
-    const int P
-) {
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    if (j >= P) return;
-
-    int offset = j * D;
-    float maxval = -1e20f;
-    float a[5];
-    assert(D <= 5); // Ensure D is small enough for static array
-
-    // First pass: find max
-    for (int d = 0; d < D; ++d) {
-        a[d] = log_theta[d];
-        float xval = x[offset + d];
-        a[d] += (obs == 1) ? logf(xval) : log1pf(-xval);
-        if (a[d] > maxval) maxval = a[d];
-    }
-
-    // Second pass: compute logsumexp
-    float accum = 0.0f;
-    for (int d = 0; d < D; ++d) {
-        accum += expf(a[d] - maxval);
-    }
-
-    out[j] = logf(accum) + maxval;
-}
-''', 'fused_logprob')
-
-def fused_log_p_obs_kernel(log_theta: cp.ndarray, x: cp.ndarray, obs: int) -> cp.ndarray:
-    P, D = x.shape
-    out = cp.empty(P, dtype=cp.float32)
-    threads = 64
-    blocks = (P + threads - 1) // threads
-    log_theta32 = log_theta.astype(cp.float32)
-    x32 = x.astype(cp.float32)
-    logprob_kernel((blocks,), (threads,),
-                   (log_theta32, x32, obs, out, D, P))
-    return out
-
-from line_profiler import profile
-
 @timer
-def forward_filter(
-    obs, thetas, s, t, particles, log_weights, ref_path, alpha, gamma, ancestors, ll, N_E, seed
-):
+@jax.jit
+def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, seed):
     """
     Forward algorithm for the particle filter.
     obs: observations [T], 0/1 array
@@ -143,88 +22,109 @@ def forward_filter(
     t: [T] time indices
     pi: initial state distribution: particles, log_weights
     """
-    np.random.seed(seed)
-    N = len(obs)
+    N_E = N_E.astype(int)
     P, D = particles.shape
-    ll[0] = 0.0
-    # forward filtering recursion
-    ell = 0
-    weights_are_uniform = False
-    inds = np.empty(P, dtype=np.int32)
-    cp.random.seed(seed)
-    log_weights = cp.asarray(log_weights)
-    particles = cp.asarray(particles)
+    T = len(z)
+    inds = jnp.empty(P, dtype=np.int32)
+    key = jax.random.key(seed)
 
-    log_thetas = cp.asarray(np.log(thetas))
-    cobs = cp.asarray(obs)
-    cs = cp.asarray(s)
-    calpha = cp.empty_like(alpha)
-    cgamma = cp.empty_like(gamma)
-    cinds = cp.empty_like(inds)
+    # Initialize particles and log weights
+    # y0|x0 ~ prod bernoulli(x0[z]) => x0 ~ beta(2Np, 2N(1-p))
+    key, subkey = jax.random.split(key)
+    n = obs[0, :, 0][:, None]
+    d = obs[0, :, 1][:, None]  # [N, 1]
+    a = 2 * N_E * jnp.sum(n * d * z[0], axis=0) + 1
+    b = 2 * N_E * jnp.sum(n * (1 - d) * z[0], axis=0) + 1
+    particles0 = (
+        jax.random.beta(subkey, a, b, shape=(P - 1, 3)).astype(jnp.int32) * 2 * N_E
+    )
+    particles = jnp.concatenate(
+        [particles0, ref_path[0][None]], axis=0
+    )  # Add reference path
+    log_weights = jnp.full((P,), -jnp.log(P), dtype=jnp.float32)  # uniform log weights
+    alpha0 = particles  # Store initial particles
 
-    for i in range(N):
-        is_transition = (i > 0) and (t[i] != t[i - 1])
+    def body(accum, carry):
+        particles, log_weights = accum
+        t, key = carry
 
-        if is_transition:
-            # resample if ess is too low
-            inds = cp.arange(P)
-            if not weights_are_uniform:
-                log_weights -= cupyx.scipy.special.logsumexp(log_weights)
-                # log_weights -= jax.scipy.special.logsumexp(log_weights)
-                ess = 1.0 / cp.sum(cp.exp(2 * log_weights))
-                if ess < P / 2:
-                    # print("ess", ess, "resampling")
-                    # resample(particles, log_weights, ll, weights_are_uniform)
-                    if weights_are_uniform:
-                        inds = np.random.randint(0, P, size=P)
-                    else:
-                        p = cp.exp(log_weights)
-                        p /= p.sum()
-                        inds = cp.random.choice(
-                            P, size=P, p=p, replace=True
-                        )
-                    particles = particles[inds]
-                    log_weights[:] = -np.log(P)  # Reset log weights to uniform
-                    weights_are_uniform = True
-            
+        # transition and process observations
+        # foll/owing pgas paper
 
-            # Save state
-            calpha[ell] = particles
-            cgamma[ell] = log_weights
-            cinds[ell] = inds
-            ell += 1
+        # line 5
+        key, subkey = jax.random.split(key)
+        inds = jax.random.categorical(subkey, shape=(P - 1,), logits=log_weights)
 
-            # Mutation step
-            p = particles / 2 / N_E
-            s_t = cs[t[i]]
-            p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
-            p_prime = cp.clip(p_prime, 0, 1)
+        # line 6
+        p = particles / 2 / N_E
+        # p' from _last_ transition
+        p_prime = (1 + s[t - 1] / 2) * p / (1 + s[t - 1] / 2 * p)
+        log_p = log_weights + jax.scipy.stats.binom.logpmf(
+            ref_path[t], 2 * N_E, p_prime
+        ).sum(1)
+        key, subkey = jax.random.split(key)
+        J = jax.random.categorical(subkey, logits=log_p)
+        inds = jnp.append(inds, J)
 
-            particles = cp.random.binomial(2 * N_E, p_prime)
-            particles = cp.concatenate([cp.asarray(ref_path[t[i]][None]), particles[1:]])
+        particles = particles[inds]
+        p = particles / 2 / N_E  # Update p with resampled particles
 
-        else:
-            # Observation step
-            x = particles / 2 / N_E
-            # log_p_obs0 = cupyx.scipy.special.logsumexp(log_thetas[i] + cupyx.scipy.special.xlogy(cobs[i], x) + cupyx.scipy.special.xlog1py(1 - cobs[i], -x), axis=1)
-            log_p_obs = fused_log_p_obs_kernel(log_thetas[i], x, obs[i])
-            log_weights += log_p_obs
-            weights_are_uniform = False
+        # p' from current transition
+        p_prime = (1 + s[t] / 2) * p / (1 + s[t] / 2 * p)
 
-    # Final resample
-    calpha[ell] = particles
-    cgamma[ell] = log_weights
+        # line 7
+        # p(x_t | x_{t-1}, y_t) proposal distn
+        # p(x_t|x_t-1)p(y_t|x_t) \propto (x_t-1 / 2 / N_E)^{x_t} (1 - x_t / 2 / N_E)^{2N_E - x_t}  *
+        # use that x / 2NE ->_d beta(2Np, 2N(1-p))
+        n = obs[t, :, 0][:, None]
+        d = obs[t, :, 1][:, None]
+        a_prime = 2 * N_E * p_prime + jnp.sum(n * d * z[t], axis=0) + 1
+        b_prime = 2 * N_E * (1 - p_prime) + jnp.sum(n * (1 - d) * z[t], axis=0) + 1
+        key, *subkeys = jax.random.split(key, 5)
+        p0 = jax.random.beta(subkeys[0], a_prime, b_prime)
+        particles0 = jax.random.binomial(
+            subkeys[1], shape=(P, 3), n=2 * N_E, p=p0
+        ).astype(jnp.int32)
+        particles1 = jax.random.randint(
+            subkeys[2], shape=(P, 3), minval=0, maxval=2 * N_E + 1
+        ).astype(jnp.int32)
+        # line 8
+        eps = 1e-6
+        b = jax.random.bernoulli(subkeys[3], eps, shape=(P, 3))
+        particles = jnp.where(b, particles1, particles0)  # Mix with random particles
+        particles = jnp.concatenate([particles[:-1], ref_path[t][None]])
 
-    alpha[:] = calpha.get()
-    gamma[:] = cgamma.get()
-    ancestors[:] = cinds.get()
+        # line 10
+        p = particles / 2 / N_E
+        r0 = (
+            jax.scipy.stats.binom.logpmf(particles, 2 * N_E, p_prime).sum(1)
+            + jsp.xlogy(n * d * z[t], p[:, None]).sum((1, 2))
+            + jsp.xlog1py(n * (1 - d) * z[t], 1 - p[:, None]).sum((1, 2))
+        )
+        # proposal distn is mixture:
+        # eps * betabinom + (1 - eps) * uniform
+        r10 = jax.scipy.stats.betabinom.logpmf(
+            particles, 2 * N_E, a_prime, b_prime
+        ).sum(1)
+        r11 = -jnp.log(2 * N_E)  # uniform log pmf
+        # r1 = log(a1 * exp(r10) + (1 - a1) * exp(r11))
+        r1 = jnp.logaddexp(r10 + jnp.log(eps), r11 + jnp.log1p(-eps))
+
+        log_weights = r0 - r1
+
+        #  line 9
+        return (particles, log_weights), (particles, inds)
+
+    (particles, log_weights), (alpha, ancestors) = jax.lax.scan(
+        body, (alpha0, log_weights), (jnp.arange(1, T), jax.random.split(key, T - 1))
+    )
+
+    alpha = jnp.concatenate([alpha0[None], alpha], axis=0)  # Add initial particles
+    return alpha, log_weights, ancestors
 
 
-import numpy as np
-from numba import njit, prange
-
-@njit(parallel=True)
-def backward_sample_pgas_batched(alpha, gamma, ancestors, batch_size, seed):
+@njit
+def backward_trace(alpha, gamma, ancestors, batch_size, seed):
     """
     Batched backward sampling with PGAS ancestor tracing using Numba on CPU.
     alpha: [N, P, D] particles
@@ -235,299 +135,21 @@ def backward_sample_pgas_batched(alpha, gamma, ancestors, batch_size, seed):
     """
     np.random.seed(seed)
     N, P, D = alpha.shape
-    ret = np.empty((batch_size, N, D), dtype=alpha.dtype)
+    ret = np.empty((N, D), dtype=alpha.dtype)
+    g = np.random.gumbel(0.0, 1.0, size=P)  # Sample Gumbel noise
+    j = np.argmax(gamma + g)  # Sample initial index j at final time
+    path_indices = np.empty(N, dtype=np.int32)
+    path_indices[-1] = j
 
-    for b in prange(batch_size):
-        # Normalize log weights at final time
-        max_log_w = np.max(gamma[-1])
-        w = np.exp(gamma[-1] - max_log_w)
-        w /= w.sum()
-
-        # Sample initial index j at final time
-        j = np.random.choice(P, p=w)
-
-        path_indices = np.empty(N, dtype=np.int32)
-        path_indices[-1] = j
-
-        # Trace ancestors backward
-        for i in range(N - 2, -1, -1):
-            j = ancestors[i + 1, j]
-            path_indices[i] = j
-
-        # Gather particles
-        for i in range(N):
-            ret[b, i, :] = alpha[i, path_indices[i], :]
-
-    return ret
-
-
-
-@jax.jit
-def gsm(log_w, key):
-    """
-    Gumbel softmax sampling.
-    log_w: [P] array of log weights
-    Returns: [P] array of sampled indices
-    """
-    P = log_w.shape[0]
-    G = jax.random.gumbel(key, shape=(P, P))
-    return jnp.argmax(G + log_w, axis=0)
-
-
-@timer
-def backward_sample_batched(
-    alpha, gamma, ancestors, s: np.ndarray, N_E: int, seed: int = 0
-) -> np.ndarray:
-    # alpha: (N, P, D)
-    # gamma: (N, P)
-    if (~np.isfinite(alpha).any()) or (~np.isfinite(gamma).any()):
-        raise ValueError("NaN detected in alpha or gamma")
-
-    key = jax.random.key(seed)
-    rng_np = np.random.default_rng(seed)
-
-    N, P, D = alpha.shape
-    ret = np.empty((N, P, D), dtype=np.int32)
-
-    # Step 0
-    key, subkey = jax.random.split(key)
-    j = gsm(gamma[N - 1], subkey)  # Sample indices using Gumbel softmax
-    ret[0] = alpha[N - 1, j]
-    n1 = np.asarray(ret[0], dtype=jnp.int32)  # [P, D]
-
-    # # steps 1, ..., N
-    # for i in range(1, N):
-    #     s_t = s[N - i - 1]
-    #     p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
-    #     p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
-    #     p_prime = np.clip(p_prime, 0, 1)
-    #     u = gamma[N - 1 - i]
-    #     v = jax.scipy.stats.binom.logpmf(n1[None, :], 2 * N_E, p_prime[:, None]).sum(axis=2)
-    #     log_w = u[:, None] + v
-    #     key, subkey = jax.random.split(key)
-    #     j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
-    #     ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
-    #     if np.any((ret[i] == 0) & (ret[i - 1] != 0)) or np.any(
-    #         (ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E)
-    #     ) or ret[i].max() > 2 * N_E or ret[i].min() < 0:
-    #         k = np.nonzero(
-    #             ((ret[i] == 0) & (ret[i - 1] != 0)) | ((ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E))
-    #         )
-    #         breakpoint()
-    #         raise ValueError("Invalid state transition detected")
-    def body(accum, tup):
-        n1, key = accum
-        s_t, alph, gam = tup
-        p0 = alph / 2 / N_E  # [P, D]
-        p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
-        p_prime = jnp.clip(p_prime, 0, 1)
-        log_w = gam[:, None] + jax.scipy.stats.binom.logpmf(
-            n1[None, :], 2 * N_E, p_prime[:, None]
-        ).sum(axis=2)
-        key, subkey = jax.random.split(key)
-        j = gsm(log_w, subkey)
-        n1 = alph[j]
-        return (n1, key), n1
-
-    ret[1:] = jax.lax.scan(
-        body, (n1, key), (s[:-1], alpha[:-1], gamma[:-1]), reverse=True
-    )[1][::-1]
-
-    return ret.transpose(
-        (1, 0, 2)
-    )  # Return shape (P, N, D) for consistency with the original code
-
-
-@timer
-@jax.jit
-def backward_sample_batched(
-    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
-) -> np.ndarray:
-    # alpha: (N, P, D)
-    # gamma: (N, P)
-    key = jax.random.key(seed)
-
-    N, P, D = alpha.shape
-
-    # Step 0
-    key, subkey = jax.random.split(key)
-    j = gsm(gamma[N - 1], subkey)  # Sample indices using Gumbel softmax
-    ret0 = alpha[N - 1, j]
-
-    # # steps 1, ..., N
-    # for i in range(1, N):
-    #     s_t = s[N - i - 1]
-    #     p0 = alpha[N - 1 - i] / 2 / N_E  # [P, D]
-    #     p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)  # [P, D]
-    #     p_prime = np.clip(p_prime, 0, 1)
-    #     u = gamma[N - 1 - i]
-    #     v = jax.scipy.stats.binom.logpmf(n1[None, :], 2 * N_E, p_prime[:, None]).sum(axis=2)
-    #     log_w = u[:, None] + v
-    #     key, subkey = jax.random.split(key)
-    #     j = gsm(log_w, subkey)  # Sample indices using Gumbel softmax
-    #     ret[i] = n1 = alpha[N - 1 - i, j]  # [P, D]
-    #     if np.any((ret[i] == 0) & (ret[i - 1] != 0)) or np.any(
-    #         (ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E)
-    #     ) or ret[i].max() > 2 * N_E or ret[i].min() < 0:
-    #         k = np.nonzero(
-    #             ((ret[i] == 0) & (ret[i - 1] != 0)) | ((ret[i] == 2 * N_E) & (ret[i - 1] != 2 * N_E))
-    #         )
-    #         breakpoint()
-    #         raise ValueError("Invalid state transition detected")
-
-    def body(accum, tup):
-        n1, key = accum
-        s_t, alph, gam = tup
-        p0 = alph / 2 / N_E  # [P, D]
-        p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
-        p_prime = jnp.clip(p_prime, 0, 1)
-        log_w = gam[:, None] + jax.scipy.stats.binom.logpmf(
-            n1[None, :], 2 * N_E, p_prime[:, None]
-        ).sum(axis=2)
-        key, subkey = jax.random.split(key)
-        j = gsm(log_w, subkey)
-        n1 = alph[j]
-        return (n1, key), n1
-
-    ret1 = jax.lax.scan(
-        body, (ret0, key), (s[:-1], alpha[:-1], gamma[:-1]), reverse=True
-    )[1][::-1]
-    ret = jnp.concatenate([ret0[None], ret1])
-    return ret.transpose(
-        (1, 0, 2)
-    )  # Return shape (P, N, D) for consistency with the original code
-
-
-def binom_logpmf_cupy(x, n, p):
-    """
-    Compute the log PMF of a binomial distribution.
-    x: number of successes
-    n: number of trials
-    p: probability of success
-    """
-    lgamma = cupyx.scipy.special.gammaln
-    log_p = cupy.log(p)
-    log_q = cupy.log1p(-p)
-    return (
-        lgamma(n + 1) - lgamma(x + 1) - lgamma(n - x + 1) + x * log_p + (n - x) * log_q
-    )
-
-
-def _binom_logpmf(x, n, p):
-    """
-    Compute the log PMF of a binomial distribution.
-    x: number of successes
-    n: number of trials
-    p: probability of success
-    """
-    if x < 0 or x > n:
-        return float("-inf")
-    if p == 0.0:
-        return 0.0 if x == 0 else float("-inf")
-    if p == 1.0:
-        return 0.0 if x == n else float("-inf")
-    if p < 0 or p > 1:
-        return float("-inf")
-    log_p = math.log(p)
-    log_q = math.log1p(-p)
-    return (
-        math.lgamma(n + 1)
-        - math.lgamma(x + 1)
-        - math.lgamma(n - x + 1)
-        + x * log_p
-        + (n - x) * log_q
-    )
-
-
-binom_logpmf = njit(_binom_logpmf, cache=True)
-# binom_logpmf_gpu = cuda.jit(device=True)(_binom_logpmf)
-
-
-# @cuda.jit(cache=True)
-def backward_sample_kernel(alpha, gamma, s, N_E, ret, rng_states):
-    b = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
-    B = ret.shape[0]
-    if b >= B:
-        return
-
-    N, P, D = alpha.shape
-    shared_ret = cuda.local.array(shape=(MAX_N, MAX_D), dtype=numba.int32)
-
-    # Step 0
-    max_score = float("-inf")
-    argmax_j = -1
-    for j in range(P):
-        g = -math.log(-math.log(xoroshiro128p_uniform_float32(rng_states, b)))
-        score = gamma[N - 1, j] + g
-        if score > max_score:
-            max_score = score
-            argmax_j = j
-    for k in range(D):
-        shared_ret[0, k] = alpha[N - 1, argmax_j, k]
-
-    # steps 1, ..., N
-    for i in range(1, N):
-        max_score = float("-inf")
-        argmax_j = -1
-        for j in range(P):
-            log_w = gamma[N - 1 - i, j]
-            for k in range(D):
-                s_t = s[N - i - 1, k]
-                n1 = shared_ret[i - 1, k]
-                p0 = alpha[N - 1 - i, j, k] / 2 / N_E
-                p_prime = (1 + s_t / 2) * p0 / (1 + s_t / 2 * p0)
-                log_w += binom_logpmf_gpu(n1, 2 * N_E, p_prime)
-            g = -math.log(-math.log(xoroshiro128p_uniform_float32(rng_states, b)))
-            score = log_w + g
-            if score > max_score:
-                max_score = score
-                argmax_j = j
-        for k in range(D):
-            shared_ret[i, k] = alpha[N - 1 - i, argmax_j, k]
+    # Trace ancestors backward
+    for i in range(N - 2, -1, -1):
+        j = ancestors[i, j]
+        path_indices[i] = j
 
     for i in range(N):
-        for k in range(D):
-            ret[b, i, k] = shared_ret[i, k]
+        ret[N - i - 1, :] = alpha[i, path_indices[i], :]
 
-
-def backward_sample_batched0(
-    alpha, gamma, s: np.ndarray, N_E: int, seed: int = 0
-) -> np.ndarray:
-    """
-    Sample B backward trajectories using the CUDA kernel.
-
-    Args:
-        alpha: (n, p, d) float32 array.
-        s: (n - 1,) float32 array.
-        N_E: Binomial parameter (int).
-        B: Number of samples to draw.
-        seed: RNG seed.
-
-    Returns:
-        ret: (B, n, d) float32 array of samples.
-    """
-    N, P, D = alpha.shape
-    assert N <= MAX_N
-    assert D <= MAX_D
-    threads_per_block = 64
-    B = P
-    blocks = (B + threads_per_block - 1) // threads_per_block
-
-    # Allocate device memory
-    alpha_d = cuda.to_device(alpha.astype(np.int32))
-    gamma_d = cuda.to_device(gamma.astype(np.float32))
-    s_d = cuda.to_device(s.astype(np.float32))
-    ret_d = cuda.device_array((B, N, D), dtype=np.int32)
-
-    # RNG
-    rng_states = create_xoroshiro128p_states(B, seed=seed)
-
-    # Launch
-    backward_sample_kernel[blocks, threads_per_block](
-        alpha_d, gamma_d, s_d, N_E, ret_d, rng_states
-    )
-
-    return ret_d.copy_to_host()
+    return ret
 
 
 def test_forward():

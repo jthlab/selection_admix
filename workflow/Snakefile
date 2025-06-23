@@ -56,7 +56,7 @@ def plot_trajectories(pop, outfile, slns, paths, data):
             t, low[:, k], high[:, k], alpha=0.2, color=cols[k]
         )
 
-    mp = bmws.data.mean_paths(data, 1000)
+    mp = bmws.data.regression_paths(data, 1000)
 
     a = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
     b = [x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
@@ -118,7 +118,7 @@ def read_data(pop):
 def run_analysis(data, sln0=None, alpha=1e4, em_iterations=50, M=10_000):
     if sln0 is None:
         sln0 = Selection.default(T=data.T, K=data.K)
-    mp = bmws.data.mean_paths(data, M)
+    mp = bmws.data.regression_paths(data, M)
     return gibbs(sln0=sln0, data=data, alpha=alpha, mean_paths=mp, niter=em_iterations, M=M, seed=42, N_E=N_E)
 
 def resample_individuals(data, Ne, rng, em_iterations, alpha, M):
@@ -220,7 +220,7 @@ rule prior:
         except ValueError:
             raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
         M = int(wc.M)
-        mp = bmws.data.mean_paths(data, M)
+        mp = bmws.data.regression_paths(data, M)
         dump_file(mp, output[0])
 
 

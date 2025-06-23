@@ -84,7 +84,7 @@ class Dataset(NamedTuple):
         return ret
 
 
-def mean_paths(data: Dataset, num_paths: int):
+def regression_paths(data: Dataset, num_paths: int):
     K = data.K
     ret = []
     Xt = sm.add_constant(np.arange(data.T).reshape(-1, 1))  # add constant for intercept
