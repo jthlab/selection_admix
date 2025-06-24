@@ -1,19 +1,11 @@
 files: '^src/bmws/'
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-    -   id: check-yaml
-    -   id: end-of-file-fixer
-    -   id: trailing-whitespace
--   repo: https://github.com/psf/black
-    rev: 24.4.2
-    hooks:
-        -   id: black
-            types: [file, python]
--   repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-        - id: isort
-          name: isort (python)
-          types: [file, python]
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  # Ruff version.
+  rev: v0.12.0
+  hooks:
+    # Run the linter.
+    - id: ruff-check
+      args: [ --fix ]
+    # Run the formatter.
+    - id: ruff-format

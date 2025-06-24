@@ -1,7 +1,5 @@
 "particle filter"
 
-import math
-
 import jax
 import jax.numpy as jnp
 import jax.scipy.special as jsp
@@ -12,7 +10,7 @@ from numba import njit
 FWD_DEBUG = False
 
 
-def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
+def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, key):
     """
     Forward algorithm for the particle filter.
     obs: observations [T], 0/1 array
@@ -32,14 +30,27 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
             breakpoint()
             os.remove("/tmp/bodybreak")
         particles, log_weights, key = accum
-        ob_t, rp_t, s_t, z_t = seq
+        mp_t, ob_t, rp_t, s_t, z_t = seq
 
         # transition and process observations
         # foll/owing pgas paper
 
         # line 5
         key, subkey = jax.random.split(key)
-        inds = jax.random.categorical(subkey, shape=(P - 1,), logits=log_weights)
+        ess = 1 / jnp.sum(jax.nn.softmax(log_weights) ** 2)
+        resample = ess < P / 2
+        inds = jnp.where(
+            resample,
+            jax.random.categorical(subkey, shape=(P - 1,), logits=log_weights),
+            jnp.arange(P - 1),
+        )
+        # jax.debug.print("ess:{} resample:{}", ess, resample)
+        log_weights = jnp.where(
+            resample,
+            jnp.full(P, -jnp.log(P)),
+            log_weights,
+        )
+
         # line 6
         p = particles / 2 / N_E
         p_prime = (1 + s_t / 2) * p / (1 + s_t / 2 * p)
@@ -47,15 +58,16 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
         log_p = log_weights + jax.scipy.stats.binom.logpmf(rp_t, 2 * N_E, p_prime).sum(
             1
         )
+
+        # if FWD_DEBUG:
+        #     try:
+        #         assert jnp.isfinite(log_p).any()
+        #     except AssertionError:
+        #         breakpoint()
+        #         pass
+
+        log_p = jnp.where(jnp.isinf(log_p).all(), jnp.zeros(P), log_p)
         key, subkey = jax.random.split(key)
-
-        if FWD_DEBUG:
-            try:
-                assert jnp.isfinite(log_p).any()
-            except AssertionError:
-                breakpoint()
-                pass
-
         J = jax.random.categorical(subkey, logits=log_p)
         inds = jnp.append(inds, J)
 
@@ -92,28 +104,36 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
             particles1 = jax.random.randint(
                 subkeys[2], shape=(P, D), minval=0, maxval=2 * N_E + 1
             ).astype(jnp.int32)
-            eps = 1e-6
-            b = jax.random.bernoulli(subkeys[3], eps, shape=(P, D))
-            particles = jnp.where(
-                b, particles1, particles0
-            )  # Mix with random particles
+            mixture_wts = jnp.array([1.0 - 1e-6, 1e-6])
+            b = jax.random.choice(subkeys[3], 2, shape=(P,), p=mixture_wts)
+            particles = jnp.stack([particles0, particles1], axis=0)[b, jnp.arange(P)]
             particles = jnp.concatenate([particles[:-1], rp_t[None]])
+
+            p0 = jnp.isclose(p_prime, 0.0)
+            p1 = jnp.isclose(p_prime, 1.0)
+            particles = jnp.where(p0, 0, particles)
+            particles = jnp.where(p1, 2 * N_E, particles)
+            poly = ~(p0 | p1)
 
             # line 10
             p = particles / 2 / N_E
             r0 = (
                 jax.scipy.stats.binom.logpmf(particles, 2 * N_E, p_prime).sum(1)
                 + jsp.xlogy(n * d * z_t, p[:, None]).sum((1, 2))
-                + jsp.xlog1py(n * (1 - d) * z_t, 1 - p[:, None]).sum((1, 2))
+                + jsp.xlog1py(n * (1 - d) * z_t, -p[:, None]).sum((1, 2))
             )
             # proposal distn is mixture:
             # eps * betabinom + (1 - eps) * uniform
-            r10 = jax.scipy.stats.betabinom.logpmf(
+            r10s = jax.scipy.stats.betabinom.logpmf(
                 particles, 2 * N_E, a_prime, b_prime
-            ).sum(1)
-            r11 = -jnp.log(2 * N_E)  # uniform log pmf
-            # r1 = log(a1 * exp(r10) + (1 - a1) * exp(r11))
-            r1 = jnp.logaddexp(r10 + jnp.log(eps), r11 + jnp.log1p(-eps))
+            )
+            r10 = jnp.sum(r10s * poly, 1)
+            r11 = jnp.sum(
+                jnp.full((P, 3), -jnp.log(2 * N_E)) * poly, 1
+            )  # uniform log pmf
+            r1 = jsp.logsumexp(
+                jnp.array([r10, r11]) + jnp.log(mixture_wts)[:, None], axis=0
+            )
             log_weights = r0 - r1
             return particles, log_weights
 
@@ -123,7 +143,7 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
 
         if FWD_DEBUG:
             f = f0 if n.sum() == 0 else f1
-            particles, log_weights = f(subkey)
+            particles, log_weights1 = f(subkey)
 
             try:
                 assert jnp.isfinite(log_weights).any()
@@ -132,7 +152,9 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
                 breakpoint()
                 pass
         else:
-            particles, log_weights = jax.lax.cond(n.sum() == 0, f0, f1, subkey)
+            particles, log_weights1 = jax.lax.cond(n.sum() == 0, f0, f1, subkey)
+
+        log_weights += log_weights1
 
         #  line 9
         return (particles, log_weights, key), (particles, inds)
@@ -142,13 +164,14 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, N_E, key):
         ancestors = []
         for t in range(T):
             (particles, log_weights, key), (_, inds) = body(
-                (particles, log_weights, key), (obs[t], ref_path[t], s[t], z[t])
+                (particles, log_weights, key),
+                (mean_path[t], obs[t], ref_path[t], s[t], z[t]),
             )
             alpha.append(particles)
             ancestors.append(inds)
     else:
         (particles, log_weights, _), (alpha, ancestors) = jax.lax.scan(
-            body, (particles, log_weights, key), (obs, ref_path, s, z)
+            body, (particles, log_weights, key), (mean_path, obs, ref_path, s, z)
         )
 
     alpha = jnp.array(alpha)
@@ -161,7 +184,7 @@ if not FWD_DEBUG:
     forward_filter = jax.jit(forward_filter)
 
 
-@njit
+@njit(parallel=True)
 def backward_trace(alpha, gamma, ancestors, seed):
     """
     Batched backward sampling with PGAS ancestor tracing using Numba on CPU.
@@ -184,53 +207,3 @@ def backward_trace(alpha, gamma, ancestors, seed):
         ret[N - i - 1] = alpha[i, j]
 
     return ret
-
-
-def test_forward():
-    """
-    Test the forward algorithm.
-    """
-    # Test the forward algorithm
-    np.seterr(divide="raise", over="raise", invalid="raise")
-    obs = np.array([0, 1, 1, 0, 1])
-    thetas = np.array([[0.5, 0.5], [0.6, 0.4], [0.7, 0.3], [0.8, 0.2], [0.9, 0.1]])
-    s = np.array([[1, 0], [0, 1], [1, 1], [0, 0], [1, 1]])
-    t = np.array([0, 1, 2, 3, 4])
-    pi = np.random.beta(1, 100, (1_000, 2))
-    seed = 42
-    alpha = forward_filter(obs, thetas, s, t, pi, seed)
-    print(alpha)
-
-
-def test_bwd_sample():
-    """
-    Test the backward sampling algorithm.
-    """
-    # Test the backward sampling algorithm
-    obs = np.array([0, 1, 1, 0, 1])
-    thetas = np.array([[0.5, 0.5], [0.6, 0.4], [0.7, 0.3], [0.8, 0.2], [0.9, 0.1]])
-    s = np.random.uniform(-0.1, 0.1, (5, 2))
-    t = np.array([0, 1, 2, 3, 4])
-    N_E = 10_000
-    particles = (2 * N_E * np.random.beta(1, 100, (10_000, 2))).astype(int)
-    log_weights = np.full((10_000,), -math.log(10_000), dtype=np.float32)
-    alpha = np.zeros((5, 10_000, 2), dtype=np.int32)
-    gamma = np.zeros((5, 10_000), dtype=np.float32)
-    ref_path = np.zeros((5, 2), dtype=np.int32)
-    ll_out = np.zeros(1)
-    forward_filter(
-        obs,
-        thetas,
-        s,
-        t,
-        particles,
-        log_weights,
-        ref_path,
-        alpha,
-        gamma,
-        ll=ll_out,
-        N_E=N_E,
-        seed=1,
-    )
-    ret = backward_sample_batched(alpha, gamma, s, N_E, 1)
-    print(ret)

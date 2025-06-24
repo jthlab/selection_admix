@@ -1,19 +1,19 @@
 import os
+import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-import sys
 
 import blackjax
 import gnuplotlib as gp
 import interpax
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import xlogy, xlog1py
 import numpy as np
 import scipy
 import tqdm
 from jax import grad, jit, lax, vmap
+from jax.scipy.special import xlog1py, xlogy
 
 import bmws.data
 
@@ -51,7 +51,7 @@ class SplineSelection:
 
     @classmethod
     def default(cls, T, K):
-        s = np.zeros((5, K))
+        s = np.zeros((10, K))
         return cls(T=T, s=s)
 
 
@@ -85,7 +85,7 @@ class PiecewiseSelection:
 Selection = SplineSelection
 
 
-def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, N_E, key):
+def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key):
     subkey1, subkey2 = jax.random.split(key)
     particles, log_weights = prior
     P, D = particles.shape
@@ -98,6 +98,7 @@ def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, N_E, key):
             particles,
             log_weights,
             ref_path,
+            mean_path,
             N_E,
             subkey1,
         ),
@@ -211,6 +212,7 @@ def gibbs(
     particles = bootstrap_paths[:, 0]
     log_weights = np.full(NUM_PARTICLES, -np.log(NUM_PARTICLES))  # uniform prior
     ref_path = bootstrap_paths.mean(0).astype(np.int32)
+    mean_path = ref_path.copy()
     assert particles.shape == (NUM_PARTICLES, data.K)
     prior = (particles, log_weights)
 
@@ -231,14 +233,17 @@ def gibbs(
     z = jnp.array(z, dtype=np.int32)  # [N, D]
 
     key, subkey = jax.random.split(key)
-    path, _ = sample_paths(sln, prior, z, obs, t, NUM_PARTICLES, ref_path, N_E, subkey)
-    beta = alpha
+    path, _ = sample_paths(
+        sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
+    )
+    beta = alpha / 100.0
 
     # a, b such that gamma with mean=alpha and variance=sqrt alpha
     # a*b = alpha
     # a*b**2 = sqrt(alpha)
     # alpha*b = sqrt(alpha) => b=1/sqrt(alpha)
-    prior_a = prior_b = jnp.sqrt(alpha)
+    prior_alpha_a = prior_alpha_b = jnp.sqrt(alpha)
+    prior_beta_a = prior_beta_b = jnp.sqrt(beta)
 
     @timer
     @jit
@@ -266,11 +271,12 @@ def gibbs(
         last_state, info = lax.scan(body, state, jax.random.split(key0, 2))
         jax.debug.print("{}", info.acceptance_rate)
         # sample alpha conditionally
-        a = prior_a + sln.M / 2
-        b_alpha = prior_b + sln.roughness() / 2
-        b_beta = prior_b + jnp.abs(sln.s).sum() / 2
-        alpha = jax.random.gamma(key1, a=a, shape=()) * b_alpha
-        beta = jax.random.gamma(key2, a=a, shape=()) * b_beta
+        a_alpha = prior_alpha_a + sln.M / 2
+        a_beta = prior_beta_a + sln.M / 2
+        b_alpha = prior_alpha_b + sln.roughness() / 2
+        b_beta = prior_beta_b + jnp.abs(sln.s).sum() / 2
+        alpha = jax.random.gamma(key1, a=a_alpha, shape=()) * b_alpha
+        beta = jax.random.gamma(key2, a=a_beta, shape=()) * b_beta
         return last_state.position, alpha, beta
 
     # em loop
@@ -283,7 +289,7 @@ def gibbs(
             assert prior[0].shape == (NUM_PARTICLES, data.K)
             key, subkey = jax.random.split(key)
             path, aux = sample_paths(
-                sln, prior, z, obs, t, NUM_PARTICLES, ref_path, N_E, subkey
+                sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
             )
 
             new_z = []
