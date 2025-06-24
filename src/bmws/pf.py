@@ -129,7 +129,7 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
             )
             r10 = jnp.sum(r10s * poly, 1)
             r11 = jnp.sum(
-                jnp.full((P, 3), -jnp.log(2 * N_E)) * poly, 1
+                jnp.full((P, D), -jnp.log(2 * N_E)) * poly, 1
             )  # uniform log pmf
             r1 = jsp.logsumexp(
                 jnp.array([r10, r11]) + jnp.log(mixture_wts)[:, None], axis=0
