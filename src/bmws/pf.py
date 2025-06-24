@@ -32,13 +32,15 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         particles, log_weights, key = accum
         mp_t, ob_t, rp_t, s_t, z_t = seq
 
+        old_particles = particles
+
         # transition and process observations
         # foll/owing pgas paper
 
         # line 5
         key, subkey = jax.random.split(key)
-        ess = 1 / jnp.sum(jax.nn.softmax(log_weights) ** 2)
-        resample = ess < P / 2
+        # ess = 1 / jnp.sum(jax.nn.softmax(log_weights) ** 2)
+        resample = True
         inds = jnp.where(
             resample,
             jax.random.categorical(subkey, shape=(P - 1,), logits=log_weights),
@@ -135,6 +137,16 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
                 jnp.array([r10, r11]) + jnp.log(mixture_wts)[:, None], axis=0
             )
             log_weights = r0 - r1
+
+            if FWD_DEBUG:
+                panc = old_particles[inds]
+                bad = ((panc == 0) & (particles > 0)) | (
+                    (panc == 2 * N_E) & (particles < 2 * N_E)
+                )
+                if bad.any():
+                    breakpoint()
+                    pass
+
             return particles, log_weights
 
         key, subkey = jax.random.split(key)
@@ -159,25 +171,40 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         #  line 9
         return (particles, log_weights, key), (particles, inds)
 
+    # d | x_0, z ~ binom(n, x0) => x0 | y0 ~ beta(...)
+    key, subkey = jax.random.split(key)
+    n, d = obs[0].T[..., None]
+    a0 = jnp.sum(n * d * z[0], axis=0) + 1
+    b0 = jnp.sum(n * (1 - d) * z[0], axis=0) + 1
+    particles = (2 * N_E * jax.random.beta(subkey, a=a0, b=b0, shape=(P, D))).astype(
+        jnp.int32
+    )
+    particles = particles.at[-1].set(ref_path[0])
+    alpha0 = particles
+    log_weights = jnp.full(P, -jnp.log(P))  # uniform weights
+
     if FWD_DEBUG:
-        alpha = []
+        alpha = [alpha0]
         ancestors = []
-        for t in range(T):
+        for t in range(1, T):
             (particles, log_weights, key), (_, inds) = body(
                 (particles, log_weights, key),
-                (mean_path[t], obs[t], ref_path[t], s[t], z[t]),
+                (t, mean_path[t], obs[t], ref_path[t], s[t], z[t]),
             )
             alpha.append(particles)
             ancestors.append(inds)
+        alpha = jnp.array(alpha)
     else:
         (particles, log_weights, _), (alpha, ancestors) = jax.lax.scan(
-            body, (particles, log_weights, key), (mean_path, obs, ref_path, s, z)
+            body,
+            (particles, log_weights, key),
+            (mean_path[1:], obs[1:], ref_path[1:], s[1:], z[1:]),
         )
 
-    alpha = jnp.array(alpha)
+    alpha = jnp.concatenate([alpha0[None], alpha])
     ancestors = jnp.array(ancestors)
 
-    return alpha, log_weights, ancestors[1:]
+    return alpha, log_weights, ancestors
 
 
 if not FWD_DEBUG:
