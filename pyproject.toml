@@ -33,18 +33,14 @@ dependencies = [
     "wrapt>=1.17.2",
     "optax>=0.2.4",
     "optimistix>=0.0.10",
-    "ruptures>=1.1.9",
     "gnuplotlib>=0.42",
     "numba>=0.61.2",
     "interpax>=0.3.8",
     "blackjax>=1.2.5",
     "rich>=14.0.0",
     "cupy-cuda12x>=13.4.1",
-    "scalene>=1.5.51",
     "ipdb>=0.13.13",
-    "line-profiler>=4.2.0",
     "jax[cuda12]>=0.5.3",
-    "tqdm>=4.67.1",
 ]
 requires-python = ">=3.12"
 readme = "README.md"
