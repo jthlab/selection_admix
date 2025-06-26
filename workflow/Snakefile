@@ -323,7 +323,7 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a{a}/em2000/M1000/{population}_{snp}.pdf"
+            config["figure_path"] + f"/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
             for a in [2.5]
