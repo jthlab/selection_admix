@@ -10,7 +10,6 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-import scipy
 import tqdm
 from jax import grad, jit, lax, vmap
 from jax.scipy.special import xlog1py, xlogy
@@ -105,8 +104,6 @@ def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key
     )
     seed = jax.random.randint(subkey2, (), 0, 2**31 - 1)
     path = backward_trace(alpha, gamma, ancestors, int(seed))
-    p = jax.nn.softmax(gamma)
-    print("H={}".format(-scipy.special.xlogy(p, p).sum()))
     # paths[:, 0] corresponds to alpha[-1], i.e. t=0
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
     path = path[::-1]
