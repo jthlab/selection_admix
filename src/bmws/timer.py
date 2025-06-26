@@ -3,6 +3,7 @@ from functools import wraps
 from typing import Any, Callable
 import os
 
+
 def timer(fn: Callable) -> Callable:
     @wraps(fn)
     def wrapper(*args, **kwargs) -> Any:
@@ -10,7 +11,7 @@ def timer(fn: Callable) -> Callable:
         result = fn(*args, **kwargs)
         # return result
         end = time.time()
-        if os.environ.get('BMWS_TIMER'):
+        if os.environ.get("BMWS_TIMER"):
             print(f"{fn.__name__} ran in {end - start:.4f} seconds")
         return result
 

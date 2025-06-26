@@ -10,7 +10,7 @@ import interpax
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tqdm
+from rich.progress import Progress
 from jax import grad, jit, lax, vmap
 from jax.scipy.special import xlog1py, xlogy
 
@@ -278,11 +278,10 @@ def gibbs(
 
     # em loop
     ret = []
-    from contextlib import nullcontext
 
-    with nullcontext():  # Progress() as progress:
-        # task = progress.add_task("MCMC...", total=niter)
-        for i in tqdm.trange(niter):
+    with Progress() as progress:
+        task = progress.add_task("MCMC...", total=niter)
+        for i in range(niter):
             assert prior[0].shape == (NUM_PARTICLES, data.K)
             key, subkey = jax.random.split(key)
             path, aux = sample_paths(
@@ -316,7 +315,7 @@ def gibbs(
                 with suppress(FileNotFoundError):
                     os.remove("/tmp/stop")
                 sys.exit(1)
-            # progress.update(task, advance=1)
+            progress.update(task, advance=1)
             if i % 10 == 0:
                 p = path / 2 / N_E
                 gp.plot(
