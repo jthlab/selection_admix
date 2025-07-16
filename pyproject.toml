@@ -2,6 +2,11 @@
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
 
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux'"
+]
+
 [tool.isort]
 profile = "black"
 
@@ -63,6 +68,6 @@ dev = [
     "joblib>=1.4.2",
     "snakemake>=9.1.11",
     "snakefmt>=0.11.0",
-    "snakemake-executor-plugin-slurm>=1.2.1",
+    "snakemake-executor-plugin-lsf>=0.2.6",
     "ruff>=0.12.0",
 ]

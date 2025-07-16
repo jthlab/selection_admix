@@ -118,7 +118,7 @@ def read_data(pop):
 
     return datasets, snps
 
-def run_analysis(data, sln0=None, alpha=1e4, em_iterations=50, M=10_000):
+def run_analysis(data, sln0=None, alpha=1e2, em_iterations=50, M=10_000):
     if sln0 is None:
         sln0 = Selection.default(T=data.T, K=data.K)
     mp = bmws.data.regression_paths(data, M)
@@ -174,7 +174,7 @@ wildcard_constraints:
 
 rule read_data_test:
     output:
-        "results/TEST/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/TEST/data.pkl",
     run:
         ds = bmws.data.Dataset.from_records(
             [
@@ -196,7 +196,7 @@ rule read_data_test:
 
 rule read_data:
     output:
-        "results/{population}/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
@@ -211,9 +211,9 @@ def _params(wc):
 
 rule prior:
     input:
-        "results/{population}/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
     output:
-        "results/{population}/{snp}/prior_{M}.pkl"
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/prior_{M}.pkl"
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -229,20 +229,23 @@ rule prior:
 
 rule analyze:
     input:
-        "results/{population}/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
     output:
-        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
-        gpus=1,
+#        gpus=1,
         runtime=RUNTIME,
-        slurm_partition="spgpu,gpu",
-        slurm_extra="--gpus 1",
+        lsf_queue="9_lpcgpu",
+        lsf_extra='-gpu "num=1" -n 1',
+#        slurm_partition="spgpu,gpu",
+#        slurm_extra="--gpus 1",
         mem="16G",
     threads: 2
     run:
         datasets, snps = load_file(input[0])
         wc = wildcards
         M = int(wc.M)
+        print(M)
         try:
             data = datasets[snps.index(wc.snp)]
         except ValueError:
@@ -256,16 +259,18 @@ rule analyze:
 
 rule resample:
     input:
-        "results/{population}/data.pkl",
-        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     output:
-        "results/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
     threads: 8
     resources:
-        gpus=1,
+#        gpus=1,
         runtime=RUNTIME,
-        slurm_partition="spgpu,gpu",
-        slurm_extra="--gpus 1",
+        lsf_queue="9_lpcgpu",
+        lsf_extra='-gpu "num=1" -n 1',
+#        slurm_partition="spgpu,gpu",
+#        slurm_extra="--gpus 1",
         mem="16G",
     run:
         datasets, snps = load_file(input[0])
@@ -281,9 +286,9 @@ rule resample:
 rule collect_resamples:
     localrule: True
     input:
-        expand("results/{{stuff}}/resample_{seed}.pkl", seed=range(10)),
+        expand("/project/mathilab/colbranl/eas_selection/results/bmws/{{stuff}}/resample_{seed}.pkl", seed=range(10)),
     output:
-        "results/{stuff}/resamples.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{stuff}/resamples.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         ss = [s for s, _ in map(load_file, input)]
@@ -293,8 +298,8 @@ rule collect_resamples:
 
 rule plot:
     input:
-        "results/{population}/data.pkl",
-        "results/{population}/{snp}/{stuff}/analyze.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/{stuff}/analyze.pkl",
     output:
         config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
     localrule: True
@@ -310,14 +315,16 @@ rule altplot:
     input:
         config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
     output:
-        "results/{population}/{snp}/{stuff}/plot.pdf"
+        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/{stuff}/plot.pdf"
     shell:
         "cp {input} {output}"
 
 ALL_SNPS = {
-    "EAS": ["snp_4_100142302_AC", "rs174548_CG"],
-    "EUR": ["rs174548_CG", "rs4988235_AG", "rs12913832_GA", "rs16891982_GC"],
-    "SAM": ["rs5760093_AG"]
+    "EAS": ["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
+#    "EUR": ["rs621341_TC","rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
+#    "SAM": ["rs1051798_CT","rs2973043_AG","rs2735003_TG","rs9273343_CT","rs2317731_TC","rs6584603_GA","rs1790341_CT","rs7168739_AG","rs2386983_GA","rs2072786_CG","rs5760093_AG"],
+#    "SAS":["rs4988235_AG","rs17353680_GA","rs1426654_AG"],
+#    "AFR":["rs6479327_GA"]
 }
 
 rule all:
@@ -326,6 +333,5 @@ rule all:
             config["figure_path"] + f"/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
-            for a in [2.5]
+            for a in [3]
         ]
-

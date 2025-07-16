@@ -1,10 +1,12 @@
-executor: slurm
+executor: lsf
 default-resources:
-  - mem_mb=4000
-  - slurm_account=jonth1
-  - slurm_partition=standard
-  - runtime=60
-local-cores: 4
+  - lsf_queue="9_normal"
+  - lsf_project="bmws_test"
+  - nCPUs=4
+  - memory=4000
+  - name="JOBNAME.{rule}.{wildcards}"
+  - output="logs/{rule}.{wildcards}.out"
+  - error="logs/{rule}.{wildcards}.err
 max-jobs-per-second: 10
 max-status-checks-per-second: 1
 jobs: 400
@@ -12,4 +14,4 @@ keep-going: True
 rerun-incomplete: True
 printshellcmds: True
 config:
-  - figure_path="/home/jonth/turbo/bmws_admix/figures"
+  - figure_path="/project/mathilab/colbranl/eas_selection/results/bmws"

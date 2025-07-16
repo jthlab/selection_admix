@@ -5,6 +5,9 @@ resolution-markers = [
     "python_full_version >= '3.13'",
     "python_full_version < '3.13'",
 ]
+required-markers = [
+    "sys_platform == 'linux'",
+]
 
 [[package]]
 name = "absl-py"
@@ -251,7 +254,7 @@ dev = [
     { name = "ruff" },
     { name = "snakefmt" },
     { name = "snakemake" },
-    { name = "snakemake-executor-plugin-slurm" },
+    { name = "snakemake-executor-plugin-lsf" },
 ]
 
 [package.metadata]
@@ -291,7 +294,7 @@ dev = [
     { name = "ruff", specifier = ">=0.12.0" },
     { name = "snakefmt", specifier = ">=0.11.0" },
     { name = "snakemake", specifier = ">=9.1.11" },
-    { name = "snakemake-executor-plugin-slurm", specifier = ">=1.2.1" },
+    { name = "snakemake-executor-plugin-lsf", specifier = ">=0.2.6" },
 ]
 
 [[package]]
@@ -2586,31 +2589,31 @@ wheels = [
 ]
 
 [[package]]
-name = "snakemake-executor-plugin-slurm"
-version = "1.4.0"
+name = "snakemake-executor-plugin-lsf"
+version = "0.2.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "snakemake-executor-plugin-slurm-jobstep" },
+    { name = "snakemake-executor-plugin-lsf-jobstep" },
     { name = "snakemake-interface-common" },
     { name = "snakemake-interface-executor-plugins" },
     { name = "throttler" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/10/90facfc5bc1a28141e404af261c31cfc20b493151e546f9acf0eca2c6ce9/snakemake_executor_plugin_slurm-1.4.0.tar.gz", hash = "sha256:5976ace7acd3b8cc8ded8c53c6c4ae477b0719907fe1490dcfb2cb6db9e686b4", size = 12465, upload-time = "2025-06-13T09:54:02.682Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/60/3a/7d891f9dcdc663d230c05ac7a41f548cbd1d0794f72b5266a14a793e6aa2/snakemake_executor_plugin_lsf-0.2.6.tar.gz", hash = "sha256:ddd4205c3a6da299d0962b6d3e689131ace1fd8547b528ab628543dd865f608d", size = 13210, upload-time = "2024-06-03T14:47:21.481Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/38/07d0fffa6e76b06d555269e05d2f111778e8c1ca2220164967257baaefef/snakemake_executor_plugin_slurm-1.4.0-py3-none-any.whl", hash = "sha256:e47519e2872199cbacf0ea8a8c7fcdf08d075835ab99080278c5f626419e5a95", size = 14007, upload-time = "2025-06-13T09:54:01.855Z" },
+    { url = "https://files.pythonhosted.org/packages/41/da/4a210bfa7b9bad082b084873ec122d7b65b16fe46b824c5c20dbd5af4cc2/snakemake_executor_plugin_lsf-0.2.6-py3-none-any.whl", hash = "sha256:8ddbd53c20a48c2447ff72cb65e95f3fd12b293c5f5348fc15e8a29dc8069823", size = 11908, upload-time = "2024-06-03T14:47:19.778Z" },
 ]
 
 [[package]]
-name = "snakemake-executor-plugin-slurm-jobstep"
-version = "0.3.0"
+name = "snakemake-executor-plugin-lsf-jobstep"
+version = "0.1.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "snakemake-interface-common" },
     { name = "snakemake-interface-executor-plugins" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/b7/74dc6815c618dd430c67b7cf39aab8231831a89c709b76a3411b45593d11/snakemake_executor_plugin_slurm_jobstep-0.3.0.tar.gz", hash = "sha256:ebcd374bdde2d4f356e61ac221cd4244566dd980db2de3250780f454e5251c49", size = 4544, upload-time = "2025-02-15T08:37:37.294Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/02/c75d3da26c2942bc0073a8aafc8da3a74dd9b281157aa52e7b0c647dc839/snakemake_executor_plugin_lsf_jobstep-0.1.10.tar.gz", hash = "sha256:72d29f3cd22061a61f138bba0ab6803b3fb7017f9475276acfa40ad20d23f44d", size = 3736, upload-time = "2024-03-11T20:50:34.285Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/53/a4aa78e3f9fe28e50fcd4e1c51631a2d8173b18dc1b6a272d55d72475ce0/snakemake_executor_plugin_slurm_jobstep-0.3.0-py3-none-any.whl", hash = "sha256:b0b045fa8e14ce4662f188fcead389228afe95a6aeef4ea094fcca672ea76fa2", size = 5317, upload-time = "2025-02-15T08:37:35.699Z" },
+    { url = "https://files.pythonhosted.org/packages/48/ef/a5e169cbf32c1e677a1c6ab25210d4380cc6f09c4746f226e60798e6a446/snakemake_executor_plugin_lsf_jobstep-0.1.10-py3-none-any.whl", hash = "sha256:e231e6e41649c528813133959536956a0a0d2b9d0a0bb76ad568d389b8ccba23", size = 4381, upload-time = "2024-03-11T20:50:31.333Z" },
 ]
 
 [[package]]
