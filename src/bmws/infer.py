@@ -301,10 +301,14 @@ def gibbs(
                 zti = jax.random.categorical(subkey, logits=log_p, axis=1)  # N
                 new_z.append(I_D[zti])
 
-            z = jnp.array(new_z, dtype=np.int32)  # [N, D]
+            z = np.array(new_z, dtype=np.int32)  # [N, D]
             key, subkey = jax.random.split(key)
             sln, alpha, beta = step(sln, alpha=alpha, beta=beta, path=path, key=subkey)
-            ret.append((sln, path, z))
+
+            # convert these to numpy to spill cpu instead of gpu memory
+            # should help with gpu oom errors
+            ret.append(jax.tree.map(np.array, (sln, path, z)))
+
             # check if /tmp/break exists, break if so, and delete the file
             if os.path.exists("/tmp/break"):
                 with suppress(FileNotFoundError):
