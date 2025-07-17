@@ -20,7 +20,7 @@ import jax.numpy as jnp
 N_E = 1e4
 RUNTIME = 180
 
-def plot_trajectories(pop, outfile, slns, paths, data):
+def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     pop_cols = {
         "EAS": ["#2F5233", "#B1D8B7", "#76B947"],
         "EUR": ["#BBD2FD", "#63D5F9", "#2A67D6"],
@@ -40,6 +40,7 @@ def plot_trajectories(pop, outfile, slns, paths, data):
     B = int(len(s) * .1)
 
     low, mid, high = np.quantile(s[B:][::50], [0.05, 0.5, 0.95], axis=0)  # [T, K]
+    loglik = np.mean(logliks[B:][::50])
 
     fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
     for k in range(K):
@@ -74,7 +75,7 @@ def plot_trajectories(pop, outfile, slns, paths, data):
     axs[0].set(xlabel="Generations before present", ylabel="Selection coefficient")
     axs[1].set(xlabel="Generations before present", ylabel="Allele frequency")
     axs[2].set(xlabel="Generations before present", ylabel="Observations")
-    # fig.suptitle(pop+": "+snp, y=1.1)
+    fig.suptitle(f"{pop} {snp} ll:{loglik:.1f}")
     plt.tight_layout()
     fig.savefig(outfile)
 
@@ -307,8 +308,8 @@ rule plot:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
         data = datasets[snps.index(wildcards.snp)]
-        slns, paths = load_file(input[1])[:2]
-        plot_trajectories(wildcards.population, output[0], slns, paths, data)
+        (slns, paths, _), logliks = load_file(input[1])
+        plot_trajectories(wildcards.population, wildcards.snp, output[0], slns, paths, data, logliks)
 
 
 rule altplot:

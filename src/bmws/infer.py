@@ -88,7 +88,7 @@ def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key
     subkey1, subkey2 = jax.random.split(key)
     particles, log_weights = prior
     P, D = particles.shape
-    alpha, gamma, ancestors = map(
+    alpha, gamma, ancestors, loglik = map(
         np.asarray,
         forward_filter(
             z,
@@ -108,7 +108,7 @@ def sample_paths(sln, prior, z, obs, t, num_paths, ref_path, mean_path, N_E, key
     # reverse the paths so that the time corresponds to the time array, i.e. in reverse order (t=T, T-1, ..., 0)
     path = path[::-1]
     ref_path[:] = path
-    return path, (alpha, gamma, ancestors)
+    return path, dict(alpha=alpha, gamma=gamma, ancestors=ancestors, loglik=loglik)
 
 
 def gibbs(
@@ -278,6 +278,7 @@ def gibbs(
 
     # em loop
     ret = []
+    logliks = []
 
     with Progress() as progress:
         task = progress.add_task("MCMC...", total=niter)
@@ -287,6 +288,7 @@ def gibbs(
             path, aux = sample_paths(
                 sln, prior, z, obs, t, NUM_PARTICLES, ref_path, mean_path, N_E, subkey
             )
+            logliks.append(aux["loglik"])
 
             new_z = []
 
@@ -343,4 +345,4 @@ def gibbs(
             # print(f"{sln.roughness()=} {alpha=} {beta=}")
 
     slns, paths, zs = zip(*ret)
-    return (slns, paths, zs)
+    return (slns, paths, zs), np.array(logliks)

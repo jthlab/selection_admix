@@ -29,7 +29,7 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         if FWD_DEBUG and os.path.exists("/tmp/bodybreak"):
             breakpoint()
             os.remove("/tmp/bodybreak")
-        particles, log_weights, key = accum
+        particles, log_weights, loglik, key = accum
         mp_t, ob_t, rp_t, s_t, z_t = seq
 
         old_particles = particles
@@ -60,6 +60,7 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         log_p = log_weights + jax.scipy.stats.binom.logpmf(rp_t, 2 * N_E, p_prime).sum(
             1
         )
+        loglik += jsp.logsumexp(log_p)
 
         # if FWD_DEBUG:
         #     try:
@@ -169,7 +170,7 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
         log_weights += log_weights1
 
         #  line 9
-        return (particles, log_weights, key), (particles, inds)
+        return (particles, log_weights, loglik, key), (particles, inds)
 
     # d | x_0, z ~ binom(n, x0) => x0 | y0 ~ beta(...)
     key, subkey = jax.random.split(key)
@@ -182,29 +183,30 @@ def forward_filter(z, obs, s, particles, log_weights, ref_path, mean_path, N_E, 
     particles = particles.at[-1].set(ref_path[0])
     alpha0 = particles
     log_weights = jnp.full(P, -jnp.log(P))  # uniform weights
+    loglik = 0.0
 
     if FWD_DEBUG:
         alpha = [alpha0]
         ancestors = []
         for t in range(1, T):
-            (particles, log_weights, key), (_, inds) = body(
-                (particles, log_weights, key),
+            (particles, log_weights, loglik, key), (_, inds) = body(
+                (particles, log_weights, loglik, key),
                 (t, mean_path[t], obs[t], ref_path[t], s[t], z[t]),
             )
             alpha.append(particles)
             ancestors.append(inds)
         alpha = jnp.array(alpha)
     else:
-        (particles, log_weights, _), (alpha, ancestors) = jax.lax.scan(
+        (particles, log_weights, loglik, _), (alpha, ancestors) = jax.lax.scan(
             body,
-            (particles, log_weights, key),
+            (particles, log_weights, loglik, key),
             (mean_path[1:], obs[1:], ref_path[1:], s[1:], z[1:]),
         )
 
     alpha = jnp.concatenate([alpha0[None], alpha])
     ancestors = jnp.array(ancestors)
 
-    return alpha, log_weights, ancestors
+    return alpha, log_weights, ancestors, loglik
 
 
 if not FWD_DEBUG:
