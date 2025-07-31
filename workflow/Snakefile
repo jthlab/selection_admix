@@ -42,6 +42,8 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     low, mid, high = np.quantile(s[B:][::50], [0.05, 0.5, 0.95], axis=0)  # [T, K]
     loglik = np.mean(logliks[B:][::50])
 
+    prefix=outfile.split(".")[0]
+    np.savetxt(prefix + "s.tsv", mid, delimiter="\t")
     fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
     for k in range(K):
         # axs[0].plot(s[:, k], color=cols[k], alpha=1)
@@ -54,6 +56,7 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     paths = paths[:, ::-1] / 2e4
     high = np.max(paths, axis=0)
     low = np.min(paths, axis=0)
+    np.savetxt(prefix + "af.tsv", np.mean(paths, axis=0), delimiter="\t")
     for k in range(K):
         axs[1].plot(np.mean(paths, axis=0)[:, k], color=cols[k])
         axs[1].fill_between(
@@ -321,10 +324,10 @@ rule altplot:
         "cp {input} {output}"
 
 ALL_SNPS = {
-    "EAS": ["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
-#    "EUR": ["rs621341_TC","rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
+    "EAS": ["snp_4_100142302_AC"] #["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
+#    "EUR": ["rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
 #    "SAM": ["rs1051798_CT","rs2973043_AG","rs2735003_TG","rs9273343_CT","rs2317731_TC","rs6584603_GA","rs1790341_CT","rs7168739_AG","rs2386983_GA","rs2072786_CG","rs5760093_AG"],
-#    "SAS":["rs4988235_AG","rs17353680_GA","rs1426654_AG"],
+#    "SAS": ["rs4988235_AG","rs17353680_GA","rs1426654_AG"],
 #    "AFR":["rs6479327_GA"]
 }
 
@@ -334,5 +337,5 @@ rule all:
             config["figure_path"] + f"/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
-            for a in [3]
+            for a in [1,1.5,2,2.5,3,3.5,4]
         ]
