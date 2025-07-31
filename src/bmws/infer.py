@@ -76,8 +76,8 @@ class PiecewiseSelection:
         return self.s[xq]
 
     @classmethod
-    def default(cls, T, K):
-        s = np.zeros((T, K))
+    def default(cls, T, K,s0=0.05):
+        s = np.zeros((T, K))+s0
         return cls(T=T, s=s)
 
 
