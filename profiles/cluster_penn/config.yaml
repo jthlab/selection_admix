@@ -13,5 +13,4 @@ jobs: 400
 keep-going: True
 rerun-incomplete: True
 printshellcmds: True
-config:
-  - figure_path="/project/mathilab/colbranl/eas_selection/results/bmws"
+directory: "/project/mathilab/colbranl/eas_selection/results/bmws"

@@ -178,7 +178,7 @@ wildcard_constraints:
 
 rule read_data_test:
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/TEST/data.pkl",
+        "TEST/data.pkl",
     run:
         ds = bmws.data.Dataset.from_records(
             [
@@ -200,7 +200,7 @@ rule read_data_test:
 
 rule read_data:
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
+        "{population}/data.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
@@ -215,9 +215,9 @@ def _params(wc):
 
 rule prior:
     input:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
+        "{population}/data.pkl",
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/prior_{M}.pkl"
+        "{population}/{snp}/prior_{M}.pkl"
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -233,9 +233,9 @@ rule prior:
 
 rule analyze:
     input:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
+        "{population}/data.pkl",
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
 #        gpus=1,
         runtime=RUNTIME,
@@ -263,10 +263,10 @@ rule analyze:
 
 rule resample:
     input:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+        "{population}/data.pkl",
+        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
+        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
     threads: 8
     resources:
 #        gpus=1,
@@ -290,9 +290,9 @@ rule resample:
 rule collect_resamples:
     localrule: True
     input:
-        expand("/project/mathilab/colbranl/eas_selection/results/bmws/{{stuff}}/resample_{seed}.pkl", seed=range(10)),
+        expand("{{stuff}}/resample_{seed}.pkl", seed=range(10)),
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{stuff}/resamples.pkl",
+        "{stuff}/resamples.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         ss = [s for s, _ in map(load_file, input)]
@@ -302,10 +302,10 @@ rule collect_resamples:
 
 rule plot:
     input:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/data.pkl",
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/{stuff}/analyze.pkl",
+        "{population}/data.pkl",
+        "{population}/{snp}/{stuff}/analyze.pkl",
     output:
-        config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
+        "../figures/{stuff}/{population}_{snp}.pdf",
     localrule: True
     run:
         jax.config.update("jax_platforms", "cpu")
@@ -317,9 +317,9 @@ rule plot:
 
 rule altplot:
     input:
-        config["figure_path"] + "/{stuff}/{population}_{snp}.pdf",
+        "../figures/{stuff}/{population}_{snp}.pdf",
     output:
-        "/project/mathilab/colbranl/eas_selection/results/bmws/{population}/{snp}/{stuff}/plot.pdf"
+        "{population}/{snp}/{stuff}/plot.pdf"
     shell:
         "cp {input} {output}"
 
@@ -334,7 +334,7 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            config["figure_path"] + f"/a{a}/em5000/M5000/{population}_{snp}.pdf"
+            f"../figures/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
             for a in [1,1.5,2,2.5,3,3.5,4]
