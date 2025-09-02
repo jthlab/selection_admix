@@ -12,6 +12,7 @@ import statsmodels.api as sm
 
 from bmws.infer import Selection, gibbs, sample_paths
 from bmws.util import tree_stack
+import bmws.sim
 import bmws.data
 
 import jax
@@ -171,7 +172,7 @@ def load_file(fn):
 
 
 wildcard_constraints:
-    population=r"[A-Z]+",
+    population=r"[A-Z0-9_]+",
     seed=r"\d+",
     snp=r"\w+",
 
@@ -200,7 +201,7 @@ rule read_data_test:
 
 rule read_data:
     output:
-        "{population}/data.pkl",
+        r"{population,\d+}/data.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
@@ -230,6 +231,92 @@ rule prior:
         mp = bmws.data.regression_paths(data, M)
         dump_file(mp, output[0])
 
+def simulation(i, seed):
+    rng = np.random.default_rng(seed)
+    if i == 0:
+        T = 300
+        D = 3
+        s = np.zeros((T + 1, D))
+        Ne = np.full_like(s, 1e4)
+        f0 = rng.uniform(0.1, 0.9, D)
+        mdl = dict(s=s, f0=f0, Ne=Ne)
+        alpha = np.ones(3)
+        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
+                for t in range(0, T, 10)
+                for _ in range(10)
+                ]
+        recs.extend([
+            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
+            for _ in range(100)
+        ])
+        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+    elif i == 1:
+        T = 300
+        D = 3
+        s = np.zeros((T + 1, D)) 
+        s[:, 0] = 0.01
+        Ne = np.full_like(s, 1e4)
+        f0 = rng.uniform(0.1, 0.9, D)
+        mdl = dict(s=s, f0=f0, Ne=Ne)
+        alpha = np.ones(3)
+        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
+                for t in range(0, T, 10)
+                for _ in range(10)
+                ]
+        recs.extend([
+            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
+            for _ in range(100)
+        ])
+        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+    elif i == 2:
+        T = 300
+        D = 3
+        s = np.zeros((T + 1, D)) 
+        s[:(T // 2), :] = 0.01
+        Ne = np.full_like(s, 1e4)
+        f0 = rng.uniform(0.1, 0.9, D)
+        mdl = dict(s=s, f0=f0, Ne=Ne)
+        alpha = np.ones(3)
+        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
+                for t in range(0, T, 10)
+                for _ in range(10)
+                ]
+        recs.extend([
+            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
+            for _ in range(100)
+        ])
+        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+    elif i == 3:
+        T = 300
+        D = 3
+        s = np.zeros((T + 1, D)) 
+        s[:(T // 2), 0] = 0.01
+        Ne = np.full_like(s, 1e4)
+        f0 = rng.uniform(0.1, 0.9, D)
+        mdl = dict(s=s, f0=f0, Ne=Ne)
+        alpha = np.ones(3)
+        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
+                for t in range(0, T, 10)
+                for _ in range(10)
+                ]
+        recs.extend([
+            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
+            for _ in range(20)
+        ])
+        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+    return recs, mdl
+
+rule sim:
+    output:
+        "SIM_{i}_{seed}/data.pkl"
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        i = int(wildcards.i)
+        seed = int(wildcards.seed)
+        recs, mdl = simulation(i, seed)
+        data = bmws.data.Dataset.from_records(recs)
+        sim_data, _ = bmws.sim.sim_admix(mdl, data, seed)
+        dump_file(([sim_data], ["sim"]), output[0])
 
 rule analyze:
     input:
@@ -237,12 +324,8 @@ rule analyze:
     output:
         "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
-#        gpus=1,
+        gpus=1,
         runtime=RUNTIME,
-        lsf_queue="9_lpcgpu",
-        lsf_extra='-gpu "num=1" -n 1',
-#        slurm_partition="spgpu,gpu",
-#        slurm_extra="--gpus 1",
         mem="16G",
     threads: 2
     run:
@@ -339,3 +422,7 @@ rule all:
             for snp in ALL_SNPS[population]
             for a in [1,1.5,2,2.5,3,3.5,4]
         ]
+
+rule run_sims:
+    input:
+        [f"SIM_{i}_{seed}/sim/a3/em1000/M1000/analyze.pkl" for i in range(4) for seed in range(5)],

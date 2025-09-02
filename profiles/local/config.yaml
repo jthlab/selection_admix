@@ -1,3 +1,4 @@
 resources:
   - gpus=1
 cores: "48"
+directory: "/scratch/bmws_admix/results"
