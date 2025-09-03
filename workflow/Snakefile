@@ -324,7 +324,8 @@ rule analyze:
     output:
         "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
-        gpus=1,
+        gpu=1,
+        partition=config['gpu_queue'],
         runtime=RUNTIME,
         mem="16G",
     threads: 2
@@ -342,45 +343,6 @@ rule analyze:
         sln0 = Selection.default(T=data.T, K=data.K)
         res = gibbs(sln0, data, alpha, em_iterations, M, seed=42)
         dump_file(res, output[0])
-
-
-rule resample:
-    input:
-        "{population}/data.pkl",
-        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
-    output:
-        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/resample_{seed}.pkl",
-    threads: 8
-    resources:
-#        gpus=1,
-        runtime=RUNTIME,
-        lsf_queue="9_lpcgpu",
-        lsf_extra='-gpu "num=1" -n 1',
-#        slurm_partition="spgpu,gpu",
-#        slurm_extra="--gpus 1",
-        mem="16G",
-    run:
-        datasets, snps = load_file(input[0])
-        (sln, prior), aux = load_file(input[1])
-        data = datasets[snps.index(wildcards.snp)]
-        alpha, em_iterations, M = _params(wildcards)
-        seed = int(wildcards.seed)
-        rng = np.random.default_rng(seed)
-        res = resample_individuals(data, N_E, rng, em_iterations, alpha, M)
-        dump_file(res, output[0])
-
-
-rule collect_resamples:
-    localrule: True
-    input:
-        expand("{{stuff}}/resample_{seed}.pkl", seed=range(10)),
-    output:
-        "{stuff}/resamples.pkl",
-    run:
-        jax.config.update("jax_platforms", "cpu")
-        ss = [s for s, _ in map(load_file, input)]
-        S = tree_stack(ss)
-        dump_file(S, output[0])
 
 
 rule plot:
@@ -403,6 +365,7 @@ rule altplot:
         "../figures/{stuff}/{population}_{snp}.pdf",
     output:
         "{population}/{snp}/{stuff}/plot.pdf"
+    localrule: True
     shell:
         "cp {input} {output}"
 
