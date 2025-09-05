@@ -94,5 +94,4 @@ def sim_admix(
         d = rng.binomial(n, p)
         obs.append((int(n), d))
     sim_data = data._replace(obs=jnp.array(obs))
-
     return sim_data, afs

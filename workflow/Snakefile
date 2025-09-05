@@ -235,77 +235,30 @@ rule prior:
 
 def simulation(i, seed):
     rng = np.random.default_rng(seed)
+    T = 400
+    D = 3
+    s = np.zeros((T + 1, D))
+    Ne = np.full_like(s, 1e4)
+    f0 = rng.beta(1, 10, D)
+    alpha = np.ones(3)
+    recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
+            for t in range(0, T, 10)
+            for _ in range(10)
+            ]
+    recs.extend([
+        dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
+        for _ in range(100)
+    ])
+    recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
     if i == 0:
-        T = 300
-        D = 3
-        s = np.zeros((T + 1, D))
-        Ne = np.full_like(s, 1e4)
-        f0 = rng.beta(1, 100, D)
-        mdl = dict(s=s, f0=f0, Ne=Ne)
         alpha = np.ones(3)
-        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
-                for t in range(0, T, 10)
-                for _ in range(10)
-                ]
-        recs.extend([
-            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-            for _ in range(100)
-        ])
-        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
     elif i == 1:
-        T = 300
-        D = 3
-        s = np.zeros((T + 1, D)) 
         s[:, 0] = 0.05
-        Ne = np.full_like(s, 1e4)
-        f0 = rng.beta(1, 100, D)
-        mdl = dict(s=s, f0=f0, Ne=Ne)
-        alpha = np.ones(3)
-        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
-                for t in range(0, T, 10)
-                for _ in range(10)
-                ]
-        recs.extend([
-            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-            for _ in range(100)
-        ])
-        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
     elif i == 2:
-        T = 300
-        D = 3
-        s = np.zeros((T + 1, D)) 
-        s[(T // 2):, :] = 0.05
-        Ne = np.full_like(s, 1e4)
-        f0 = rng.beta(1, 100, D)
-        mdl = dict(s=s, f0=f0, Ne=Ne)
-        alpha = np.ones(3)
-        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
-                for t in range(0, T, 10)
-                for _ in range(10)
-                ]
-        recs.extend([
-            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-            for _ in range(100)
-        ])
-        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+        s[:(T // 2), :] = 0.05
     elif i == 3:
-        T = 300
-        D = 3
-        s = np.zeros((T + 1, D)) 
-        s[(T // 2):, 0] = 0.01
-        Ne = np.full_like(s, 1e4)
-        f0 = rng.beta(1, 100, D)
-        mdl = dict(s=s, f0=f0, Ne=Ne)
-        alpha = np.ones(3)
-        recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
-                for t in range(0, T, 10)
-                for _ in range(10)
-                ]
-        recs.extend([
-            dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-            for _ in range(20)
-        ])
-        recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+        s[:(T // 2), 0] = 0.1
+    mdl = dict(s=s, f0=f0, Ne=Ne)
     return recs, mdl
 
 rule sim:
@@ -317,8 +270,8 @@ rule sim:
         seed = int(wildcards.seed)
         recs, mdl = simulation(i, seed)
         data = bmws.data.Dataset.from_records(recs)
-        sim_data, _ = bmws.sim.sim_admix(mdl, data, seed)
-        dump_file(([sim_data], ["sim"]), output[0])
+        data, af = bmws.sim.sim_admix(mdl, data, seed)
+        dump_file(([data], ["sim"]), output[0])
 
 rule analyze:
     input:
