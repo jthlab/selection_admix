@@ -2,7 +2,7 @@ import logging
 
 import jax.numpy as jnp
 
-from bmws.betamix import Dataset
+from bmws.data import Dataset
 
 from typing import Union
 

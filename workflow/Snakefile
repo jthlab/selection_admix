@@ -29,8 +29,7 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
         "SAS": ["#AE307F", "#6E2ED9"],
         "AFR": ["#FF8247", "#CD853F", "#E8AD17"],
     }
-    pop_cols["TEST"] = pop_cols["EAS"]
-    cols = pop_cols[pop]
+    cols = pop_cols.get(pop, pop_cols["EAS"])
     K = len(cols)
 
     t = np.arange(data.T)
@@ -68,14 +67,17 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
 
     a = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
     b = [x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
-    sns.regplot(
-        x=a,
-        y=b,
-        logistic=True,
-        scatter=True,
-        ax=axs[2],
-        line_kws={"color": "black", "alpha": 0.5},
-    )
+    try:
+        sns.regplot(
+            x=a,
+            y=b,
+            logistic=True,
+            scatter=True,
+            ax=axs[2],
+            line_kws={"color": "black", "alpha": 0.5},
+        )
+    except:
+        pass
     axs[0].set(xlabel="Generations before present", ylabel="Selection coefficient")
     axs[1].set(xlabel="Generations before present", ylabel="Allele frequency")
     axs[2].set(xlabel="Generations before present", ylabel="Observations")
@@ -238,7 +240,7 @@ def simulation(i, seed):
         D = 3
         s = np.zeros((T + 1, D))
         Ne = np.full_like(s, 1e4)
-        f0 = rng.uniform(0.1, 0.9, D)
+        f0 = rng.beta(1, 100, D)
         mdl = dict(s=s, f0=f0, Ne=Ne)
         alpha = np.ones(3)
         recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
@@ -254,9 +256,9 @@ def simulation(i, seed):
         T = 300
         D = 3
         s = np.zeros((T + 1, D)) 
-        s[:, 0] = 0.01
+        s[:, 0] = 0.05
         Ne = np.full_like(s, 1e4)
-        f0 = rng.uniform(0.1, 0.9, D)
+        f0 = rng.beta(1, 100, D)
         mdl = dict(s=s, f0=f0, Ne=Ne)
         alpha = np.ones(3)
         recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
@@ -272,9 +274,9 @@ def simulation(i, seed):
         T = 300
         D = 3
         s = np.zeros((T + 1, D)) 
-        s[:(T // 2), :] = 0.01
+        s[(T // 2):, :] = 0.05
         Ne = np.full_like(s, 1e4)
-        f0 = rng.uniform(0.1, 0.9, D)
+        f0 = rng.beta(1, 100, D)
         mdl = dict(s=s, f0=f0, Ne=Ne)
         alpha = np.ones(3)
         recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
@@ -290,9 +292,9 @@ def simulation(i, seed):
         T = 300
         D = 3
         s = np.zeros((T + 1, D)) 
-        s[:(T // 2), 0] = 0.01
+        s[(T // 2):, 0] = 0.01
         Ne = np.full_like(s, 1e4)
-        f0 = rng.uniform(0.1, 0.9, D)
+        f0 = rng.beta(1, 100, D)
         mdl = dict(s=s, f0=f0, Ne=Ne)
         alpha = np.ones(3)
         recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
@@ -324,9 +326,9 @@ rule analyze:
     output:
         "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
-        gpu=1,
-        partition=config['gpu_queue'],
         runtime=RUNTIME,
+        slurm_extra="--gpus 1",
+        slurm_partition="gpu,spgpu",
         mem="16G",
     threads: 2
     run:
@@ -351,7 +353,6 @@ rule plot:
         "{population}/{snp}/{stuff}/analyze.pkl",
     output:
         "../figures/{stuff}/{population}_{snp}.pdf",
-    localrule: True
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -388,4 +389,4 @@ rule all:
 
 rule run_sims:
     input:
-        [f"SIM_{i}_{seed}/sim/a3/em1000/M1000/analyze.pkl" for i in range(4) for seed in range(5)],
+        [f"../figures/a3/em5000/M1000/SIM_{i}_{seed}_sim.pdf" for i in range(4) for seed in range(5)],
