@@ -47,6 +47,8 @@ dependencies = [
     "ipdb>=0.13.13",
     "jax[cuda12]>=0.5.3",
     "flowjax>=17.2.0",
+    "snakemake>=9.5.1",
+    "snakemake-executor-plugin-slurm>=1.6.1",
 ]
 requires-python = ">=3.12"
 readme = "README.md"

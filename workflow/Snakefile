@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 N_E = 1e4
-RUNTIME = 180
+RUNTIME = 720
 
 def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     pop_cols = {
@@ -85,6 +85,26 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     plt.tight_layout()
     fig.savefig(outfile)
 
+def plot_sim_trajectories(inputs, sim, outfile):
+    ss = []
+    t = np.arange(300)
+    for a in inputs:
+        (slns, paths, _), logliks = load_file(a)
+        st = [sln(t) for sln in slns]
+        st = st[500:][::20]
+        s = np.median(st, axis=0)
+        ss.append(s)
+    ss = np.median(ss, axis=0)
+    _, mdl = simulation(sim, 42)
+    true_s = mdl['s']
+    fig, axs = plt.subplots(ncols=2, sharex=True, sharey=True)
+    colors = ["#BBD2FD", "#63D5F9", "#2A67D6"]
+    for k in range(3):
+        axs[0].plot(t, ss[:, k], color=colors[k])
+        axs[1].plot(t, true_s[:300, k], color=colors[k])
+    axs[0].set_ylabel("$s$")
+    fig.tight_layout()
+    fig.savefig(outfile)
 
 def read_data(pop):
     pop = pop.lower()
@@ -323,6 +343,16 @@ rule altplot:
     shell:
         "cp {input} {output}"
 
+rule plot_compare:
+    input:
+        expand("SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))
+    output:
+        "../figures/{stuff}/SIM_{i}_compare.pdf",
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        i = int(wildcards.i)
+        plot_sim_trajectories(input, i, output[0])
+
 ALL_SNPS = {
     "EAS": ["snp_4_100142302_AC"] #["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
 #    "EUR": ["rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
@@ -342,4 +372,4 @@ rule all:
 
 rule run_sims:
     input:
-        [f"../figures/a3/em5000/M1000/SIM_{i}_{seed}_sim.pdf" for i in range(4) for seed in range(5)],
+        [f"../figures/a3/em2000/M2000/SIM_{i}_compare.pdf" for i in range(4)]
