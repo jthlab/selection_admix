@@ -87,13 +87,13 @@ def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
 
 def plot_sim_trajectories(inputs, sim, outfile):
     ss = []
-    t = np.arange(300)
+    t = np.arange(400)
     for a in inputs:
         (slns, paths, _), logliks = load_file(a)
         st = [sln(t) for sln in slns]
         st = st[500:][::20]
-        s = np.median(st, axis=0)
-        ss.append(s)
+        q25, med, q75 = np.quantile(st, [0.25, 0.5, 0.75], axis=0)
+        ss.append(med)
     ss = np.median(ss, axis=0)
     _, mdl = simulation(sim, 42)
     true_s = mdl['s']
@@ -101,8 +101,10 @@ def plot_sim_trajectories(inputs, sim, outfile):
     colors = ["#BBD2FD", "#63D5F9", "#2A67D6"]
     for k in range(3):
         axs[0].plot(t, ss[:, k], color=colors[k])
-        axs[1].plot(t, true_s[:300, k], color=colors[k])
+        axs[1].plot(t, true_s[:400, k], color=colors[k], linestyle="--")
     axs[0].set_ylabel("$s$")
+    axs[0].set_xlabel("Generations ago")
+    axs[1].set_xlabel("Generations ago")
     fig.tight_layout()
     fig.savefig(outfile)
 
@@ -372,4 +374,4 @@ rule all:
 
 rule run_sims:
     input:
-        [f"../figures/a3/em2000/M2000/SIM_{i}_compare.pdf" for i in range(4)]
+        [f"../figures/a3/em5000/M5000/SIM_{i}_compare.pdf" for i in range(4)]
