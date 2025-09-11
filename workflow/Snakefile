@@ -105,6 +105,8 @@ def plot_sim_trajectories(inputs, sim, outfile):
     axs[0].set_ylabel("$s$")
     axs[0].set_xlabel("Generations ago")
     axs[1].set_xlabel("Generations ago")
+    axs[0].set_ylim(-.1, .1)
+    axs[1].set_ylim(-.1, .1)
     fig.tight_layout()
     fig.savefig(outfile)
 
@@ -269,7 +271,7 @@ def simulation(i, seed):
             ]
     recs.extend([
         dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-        for _ in range(100)
+        for _ in range(400)
     ])
     recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
     if i == 0:
@@ -350,6 +352,9 @@ rule plot_compare:
         expand("SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))
     output:
         "../figures/{stuff}/SIM_{i}_compare.pdf",
+    resources:
+        mem="16G",
+        runtime=120,
     run:
         jax.config.update("jax_platforms", "cpu")
         i = int(wildcards.i)
@@ -374,4 +379,4 @@ rule all:
 
 rule run_sims:
     input:
-        [f"../figures/a3/em5000/M5000/SIM_{i}_compare.pdf" for i in range(4)]
+        [f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(4)]
