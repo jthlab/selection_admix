@@ -15,4 +15,4 @@ rerun-incomplete: True
 printshellcmds: True
 directory: "/project/mathilab/colbranl/eas_selection/results/bmws"
 config:
-  - gpu_queue="9_gpu"
+  - gpu_queue="9_lpcgpu"
