@@ -274,14 +274,32 @@ def simulation(i, seed):
         for _ in range(400)
     ])
     recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
-    if i == 0:
+    if i == 0: #no selection anywhere
         alpha = np.ones(3)
     elif i == 1:
-        s[:, 0] = 0.05
+        s[:(T // 2), :] = 0.01 #s=0.01 for half the time in all 3 components
     elif i == 2:
-        s[:(T // 2), :] = 0.05
+        s[:(T // 2), :] = 0.02 #s=0.02 for half the time in all 3 components
     elif i == 3:
-        s[:(T // 2), 0] = 0.1
+        s[:(T // 2), :] = 0.05 #s=0.05 for half the time in all 3 components
+    elif i == 4:
+        s[:(T // 2), :] = 0.1 #s=0.1 for half the time in all 3 components
+    elif i == 5:
+        s[(T//4):(T+1-(T//4)),1] = 0.01 #s=0.01 for middle half the time in one component
+    elif i == 6:
+        s[(T//4):(T+1-(T//4)),1] = 0.02 #s=0.02 for middle half the time in one component
+    elif i == 7:
+        s[(T//4):(T+1-(T//4)),1] = 0.05 #s=0.05 for middle half the time in one component
+    elif i == 8:
+        s[(T//4):(T+1-(T//4)),1] = 0.1 #s=0.1 for middle half the time in one component
+    elif i == 9:
+        s[:, 0] = 0.1 #constant selection at s=0.1 in 1 component
+    elif i == 10:
+        s[:, 0] = 0.01 #constant selection at s=0.01 in 1 component
+    elif i == 11:
+        s[:, 0] = 0.02 #constant selection at s=0.02 in 1 component
+    elif i == 12:
+        s[:, 0] = 0.05 #constant selection at s=0.05 in 1 component
     mdl = dict(s=s, f0=f0, Ne=Ne)
     return recs, mdl
 
@@ -361,7 +379,7 @@ rule plot_compare:
         plot_sim_trajectories(input, i, output[0])
 
 ALL_SNPS = {
-    "EAS": ["snp_4_100142302_AC"] #["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
+    "EAS": ["rs1229984_TC"] #["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
 #    "EUR": ["rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
 #    "SAM": ["rs1051798_CT","rs2973043_AG","rs2735003_TG","rs9273343_CT","rs2317731_TC","rs6584603_GA","rs1790341_CT","rs7168739_AG","rs2386983_GA","rs2072786_CG","rs5760093_AG"],
 #    "SAS": ["rs4988235_AG","rs17353680_GA","rs1426654_AG"],
@@ -374,9 +392,9 @@ rule all:
             f"../figures/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
-            for a in [1,1.5,2,2.5,3,3.5,4]
+            for a in [1]#,1.5,2,2.5,3,3.5,4]
         ]
 
 rule run_sims:
     input:
-        [f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(4)]
+        [f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(2)]
