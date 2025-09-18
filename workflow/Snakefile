@@ -227,7 +227,7 @@ rule read_data_test:
 
 rule read_data:
     output:
-        r"{population,\d+}/data.pkl",
+        r"{population}/data.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
