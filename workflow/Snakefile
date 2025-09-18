@@ -205,7 +205,7 @@ wildcard_constraints:
 
 rule read_data_test:
     output:
-        "TEST/data.pkl",
+        config["results_dir"]+"TEST/data.pkl",
     run:
         ds = bmws.data.Dataset.from_records(
             [
@@ -227,7 +227,7 @@ rule read_data_test:
 
 rule read_data:
     output:
-        r"{population}/data.pkl",
+        config["results_dir"]+r"{population}/data.pkl",
     run:
         jax.config.update("jax_platforms", "cpu")
         res = read_data(wildcards.population)
@@ -242,9 +242,9 @@ def _params(wc):
 
 rule prior:
     input:
-        "{population}/data.pkl",
+        config["results_dir"]+"{population}/data.pkl",
     output:
-        "{population}/{snp}/prior_{M}.pkl"
+        config["results_dir"]+"{population}/{snp}/prior_{M}.pkl"
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -305,7 +305,7 @@ def simulation(i, seed):
 
 rule sim:
     output:
-        "SIM_{i}_{seed}/data.pkl"
+        config["results_dir"]+"SIM_{i}_{seed}/data.pkl"
     run:
         jax.config.update("jax_platforms", "cpu")
         i = int(wildcards.i)
@@ -317,14 +317,16 @@ rule sim:
 
 rule analyze:
     input:
-        "{population}/data.pkl",
+        config["results_dir"]+"{population}/data.pkl",
     output:
-        "{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+        config["results_dir"]+"{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
     resources:
         runtime=RUNTIME,
         slurm_extra="--gpus 1",
         slurm_partition="gpu,spgpu",
         mem="16G",
+        lsf_queue="9_lpcgpu",
+        lsf_extra='-gpu "num=1" -n 1',
     threads: 2
     run:
         datasets, snps = load_file(input[0])
@@ -344,10 +346,10 @@ rule analyze:
 
 rule plot:
     input:
-        "{population}/data.pkl",
-        "{population}/{snp}/{stuff}/analyze.pkl",
+        config["results_dir"]+"{population}/data.pkl",
+        config["results_dir"]+"{population}/{snp}/{stuff}/analyze.pkl",
     output:
-        "../figures/{stuff}/{population}_{snp}.pdf",
+        config["results_dir"]+"../figures/{stuff}/{population}_{snp}.pdf",
     run:
         jax.config.update("jax_platforms", "cpu")
         datasets, snps = load_file(input[0])
@@ -358,18 +360,18 @@ rule plot:
 
 rule altplot:
     input:
-        "../figures/{stuff}/{population}_{snp}.pdf",
+        config["results_dir"]+"../figures/{stuff}/{population}_{snp}.pdf",
     output:
-        "{population}/{snp}/{stuff}/plot.pdf"
+        config["results_dir"]+"{population}/{snp}/{stuff}/plot.pdf"
     localrule: True
     shell:
         "cp {input} {output}"
 
 rule plot_compare:
     input:
-        expand("SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))
+        expand(config["results_dir"]+"SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))
     output:
-        "../figures/{stuff}/SIM_{i}_compare.pdf",
+        config["results_dir"]+"../figures/{stuff}/SIM_{i}_compare.pdf",
     resources:
         mem="16G",
         runtime=120,
@@ -389,7 +391,7 @@ ALL_SNPS = {
 rule all:
     input:
         [
-            f"../figures/a{a}/em5000/M5000/{population}_{snp}.pdf"
+            config["results_dir"]+f"../figures/a{a}/em5000/M5000/{population}_{snp}.pdf"
             for population in ALL_SNPS
             for snp in ALL_SNPS[population]
             for a in [1]#,1.5,2,2.5,3,3.5,4]
@@ -397,4 +399,4 @@ rule all:
 
 rule run_sims:
     input:
-        [f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(2)]
+        [config["results_dir"]+f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(2)]

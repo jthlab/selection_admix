@@ -12,3 +12,5 @@ keep-going: True
 rerun-incomplete: True
 printshellcmds: True
 directory: "/nfs/turbo/lsa-jonth/jonth/bmws_admix/results"
+config:
+  - results_dir="/nfs/turbo/lsa-jonth/jonth/bmws_admix/results/"
