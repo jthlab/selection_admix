@@ -21,6 +21,9 @@ import jax.numpy as jnp
 N_E = 1e4
 RUNTIME = 720
 
+ruleorder: sim > read_data
+ruleorder: plot_compare > plot
+
 def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
     pop_cols = {
         "EAS": ["#2F5233", "#B1D8B7", "#76B947"],
