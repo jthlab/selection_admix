@@ -21,7 +21,7 @@ import jax.numpy as jnp
 N_E = 1e4
 RUNTIME = 720
 
-ruleorder: sim > read_data
+ruleorder: sim > read_data #resolve ambiguity in simulation workflow
 ruleorder: plot_compare > plot
 
 def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
@@ -97,19 +97,21 @@ def plot_sim_trajectories(inputs, sim, outfile):
         st = st[500:][::20]
         q25, med, q75 = np.quantile(st, [0.25, 0.5, 0.75], axis=0)
         ss.append(med)
-    ss = np.median(ss, axis=0)
+    # ss = np.median(ss, axis=0)
     _, mdl = simulation(sim, 42)
     true_s = mdl['s']
     fig, axs = plt.subplots(ncols=2, sharex=True, sharey=True)
     colors = ["#BBD2FD", "#63D5F9", "#2A67D6"]
+    print(ss)
     for k in range(3):
-        axs[0].plot(t, ss[:, k], color=colors[k])
+        for s in ss:
+            axs[0].plot(t, s[:, k], color=colors[k])
         axs[1].plot(t, true_s[:400, k], color=colors[k], linestyle="--")
     axs[0].set_ylabel("$s$")
     axs[0].set_xlabel("Generations ago")
     axs[1].set_xlabel("Generations ago")
-    axs[0].set_ylim(-.1, .1)
-    axs[1].set_ylim(-.1, .1)
+    axs[0].set_ylim(-.11, .11)
+    axs[1].set_ylim(-.11, .11)
     fig.tight_layout()
     fig.savefig(outfile)
 
@@ -266,7 +268,8 @@ def simulation(i, seed):
     D = 3
     s = np.zeros((T + 1, D))
     Ne = np.full_like(s, 1e4)
-    f0 = rng.beta(1, 10, D)
+    # f0 = rng.beta(1, 10, D)
+    f0 = [0.1,0.1,0.1]
     alpha = np.ones(3)
     recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
             for t in range(0, T, 10)
@@ -303,6 +306,14 @@ def simulation(i, seed):
         s[:, 0] = 0.02 #constant selection at s=0.02 in 1 component
     elif i == 12:
         s[:, 0] = 0.05 #constant selection at s=0.05 in 1 component
+    elif i == 13:
+        s[:, :] = 0.02 #constant selection at s=0.02 in all component
+    elif i == 14:
+        s[:, :] = 0.05 #constant selection at s=0.05 in all component
+    elif i == 15:
+        s[:, :] = 0.01 #constant selection at s=0.01 in all component
+    elif i == 16:
+        s[:, :] = 0.1 #constant selection at s=0.1 in all component
     mdl = dict(s=s, f0=f0, Ne=Ne)
     return recs, mdl
 
@@ -316,6 +327,7 @@ rule sim:
         recs, mdl = simulation(i, seed)
         data = bmws.data.Dataset.from_records(recs)
         data, af = bmws.sim.sim_admix(mdl, data, seed)
+        print(output[0])
         dump_file(([data], ["sim"]), output[0])
 
 rule analyze:
@@ -332,6 +344,7 @@ rule analyze:
         lsf_extra='-gpu "num=1" -n 1',
     threads: 2
     run:
+        print(input[0])
         datasets, snps = load_file(input[0])
         wc = wildcards
         M = int(wc.M)
@@ -372,7 +385,7 @@ rule altplot:
 
 rule plot_compare:
     input:
-        expand(config["results_dir"]+"SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))
+        expand(config["results_dir"]+"SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))#10
     output:
         config["results_dir"]+"../figures/{stuff}/SIM_{i}_compare.pdf",
     resources:
@@ -402,4 +415,4 @@ rule all:
 
 rule run_sims:
     input:
-        [config["results_dir"]+f"../figures/a3.1/em2000/M5000/SIM_{i}_compare.pdf" for i in range(2)]
+        [config["results_dir"]+f"../figures/a2/em2002/M5000/SIM_{i}_compare.pdf" for i in [0,1,7,10,16]]
