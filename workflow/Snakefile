@@ -262,24 +262,11 @@ rule prior:
         mp = bmws.data.regression_paths(data, M)
         dump_file(mp, output[0])
 
-def simulation(i, seed):
+def simulation(i, seed, T, D):
     rng = np.random.default_rng(seed)
-    T = 400
-    D = 3
-    s = np.zeros((T + 1, D))
+    s = np.zeros((T, D))
     Ne = np.full_like(s, 1e4)
-    # f0 = rng.beta(1, 10, D)
-    f0 = [0.1,0.1,0.1]
-    alpha = np.ones(3)
-    recs = [dict(t=t, theta=rng.dirichlet(alpha), obs=(1, 1))
-            for t in range(0, T, 10)
-            for _ in range(10)
-            ]
-    recs.extend([
-        dict(t=0, theta=rng.dirichlet(alpha), obs=(1, 1))
-        for _ in range(400)
-    ])
-    recs.append(dict(t=T, theta=rng.dirichlet(alpha), obs=(1, 1)))
+    f0 = np.array([0.1, 0.1, 0.1])
     if i == 0: #no selection anywhere
         alpha = np.ones(3)
     elif i == 1:
@@ -315,18 +302,21 @@ def simulation(i, seed):
     elif i == 16:
         s[:, :] = 0.1 #constant selection at s=0.1 in all component
     mdl = dict(s=s, f0=f0, Ne=Ne)
-    return recs, mdl
+    return mdl
 
 rule sim:
+    input:
+        config["results_dir"]+"EAS/data.pkl",
     output:
         config["results_dir"]+"SIM_{i}_{seed}/data.pkl"
     run:
         jax.config.update("jax_platforms", "cpu")
         i = int(wildcards.i)
         seed = int(wildcards.seed)
-        recs, mdl = simulation(i, seed)
-        data = bmws.data.Dataset.from_records(recs)
-        data, af = bmws.sim.sim_admix(mdl, data, seed)
+        tup = load_file(input[0])
+        template_data = tup[0][0]
+        mdl = simulation(i, seed, template_data.T, template_data.K)
+        data, af = bmws.sim.sim_admix(mdl, template_data, data, seed)
         print(output[0])
         dump_file(([data], ["sim"]), output[0])
 
