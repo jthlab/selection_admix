@@ -1,46 +1,76 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
-build-backend = "setuptools.build_meta"
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
 
-[tool.setuptools_scm]
-# For smarter version schemes and other configuration options,
-# check out https://github.com/pypa/setuptools_scm
-version_scheme = "no-guess-dev"
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux'"
+]
+
+[tool.isort]
+profile = "black"
 
 [tool.pdm]
-distribution = false
-package-dir = "src"
+distribution = true
+
+[tool.pdm.version]
+source = "scm"
 
 [project]
-name = "bmws"
-version = "0.1.0"
-description = "Beta-mixture with spikes model"
+name = "bmws_admix"
+description = "Default template for PDM package"
 authors = [
-    {name = "Iain Mathieson", email="mathi@pennmedicine.upenn.edu"},
     {name = "Jonathan Terhorst", email = "jonth@umich.edu"},
+    {name = "Iain Mathieson", email="mathi@pennmedicine.upenn.edu"},
 ]
 dependencies = [
-    "setuptools>=69.1.1",
-    "jax",
-    "jaxlib",
-    "matplotlib",
-    "numpy",
-    "scipy",
+    "matplotlib<4,>=3",
+    "numpy>=1.20",
+    "scipy>=1.12",
+    "jaxopt>=0.8.5",
+    "loguru>=0.7.2",
+    "platformdirs>=4.2.2",
+    "seaborn>=0.13.2",
+    "jupyter>=1.1.1",
+    "notebook>=7",
+    "statsmodels>=0.14.4",
+    "equinox>=0.11.12",
+    "wrapt>=1.17.2",
+    "optax>=0.2.4",
+    "optimistix>=0.0.10",
+    "gnuplotlib>=0.42",
+    "numba>=0.61.2",
+    "interpax>=0.3.8",
+    "blackjax>=1.2.5",
+    "rich>=14.0.0",
+    "cupy-cuda12x>=13.4.1",
+    "ipdb>=0.13.13",
+    "jax[cuda12]>=0.5.3",
+    "flowjax>=17.2.0",
+    "snakemake>=9.5.1",
+    "snakemake-executor-plugin-slurm>=1.6.1",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 readme = "README.md"
 license = {text = "MIT"}
-
-[project.urls]
-Homepage = "https://github.com/jthlab/bmws"
-
-[project.optional-dependencies]
-testing = [
-    "pytest>=8.0.2",
-    "pytest-console-scripts",
-    "pytest-cov",
-    "setuptools",
-]
+dynamic = ["version"]
 
 [project.scripts]
 bmws = "bmws.cli:bmws_main"
+
+[project.optional-dependencies]
+gpu = [
+    "jax[cuda12]>=0.5.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.1",
+    "pandas>=2.2.2",
+    "jupytext>=1.16.2",
+    "joblib>=1.4.2",
+    "snakemake>=9.1.11",
+    "snakefmt>=0.11.0",
+    "snakemake-executor-plugin-lsf>=0.2.6",
+    "ruff>=0.12.0",
+]

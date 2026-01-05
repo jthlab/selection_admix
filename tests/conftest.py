@@ -1,28 +1,35 @@
 import numpy as np
-import pytest
+from pytest import fixture
 
+@fixture(params=range(3))
+def seed(request):
+    return request.param
 
-@pytest.fixture
+@fixture
+def rng(seed):
+    return np.random.default_rng(seed)
+
+@fixture
 def times():
     return tuple(range(0, 200, 10))[::-1]
 
 
-@pytest.fixture
+@fixture
 def T(times):
     return len(times)
 
 
-@pytest.fixture
+@fixture
 def Ne(T):
     return np.array([100.0] * T)
 
 
-@pytest.fixture
+@fixture
 def s(times):
     return np.zeros(len(times[:-1]))
 
 
-@pytest.fixture
+@fixture
 def obs(times):
     T = len(times)
     n = np.random.randint(2, 20, size=T)

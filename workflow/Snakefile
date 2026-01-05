@@ -1,0 +1,408 @@
+import os
+# prevent jax from gobbling up all the gpu memory
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+import pickle
+import numpy as np
+import bmws.data
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.api as sm
+
+from bmws.infer import Selection, gibbs, sample_paths
+from bmws.util import tree_stack
+import bmws.sim
+import bmws.data
+
+import jax
+import jax.numpy as jnp
+
+N_E = 1e4
+RUNTIME = 720
+
+ruleorder: sim > read_data #resolve ambiguity in simulation workflow
+ruleorder: plot_compare > plot
+
+def plot_trajectories(pop, snp, outfile, slns, paths, data, logliks):
+    pop_cols = {
+        "EAS": ["#2F5233", "#B1D8B7", "#76B947"],
+        "EUR": ["#BBD2FD", "#63D5F9", "#2A67D6"],
+        "SAM": ["#B03437", "#5885AF"],
+        "SAS": ["#AE307F", "#6E2ED9"],
+        "AFR": ["#FF8247", "#CD853F", "#E8AD17"],
+    }
+    cols = pop_cols.get(pop, pop_cols["EAS"])
+    K = len(cols)
+
+    t = np.arange(data.T)
+
+    s = np.array([si(t) for si in slns])
+
+    M = len(s)
+    B = int(len(s) * .1)
+
+    low, mid, high = np.quantile(s[B:][::50], [0.05, 0.5, 0.95], axis=0)  # [T, K]
+    loglik = np.mean(logliks[B:][::50])
+
+    prefix=outfile.split(".")[0]
+    np.savetxt(prefix + "s.tsv", mid, delimiter="\t")
+    fig, axs = plt.subplots(ncols=3, nrows=1, figsize=(10, 3))
+    for k in range(K):
+        # axs[0].plot(s[:, k], color=cols[k], alpha=1)
+        axs[0].plot(mid[:, k], color=cols[k], alpha=1)
+        axs[0].fill_between(
+            t, low[:, k], high[:, k], alpha=0.2, color=cols[k]
+        )
+
+    paths = np.array(paths)[B:][::50]
+    paths = paths[:, ::-1] / 2e4
+    high = np.max(paths, axis=0)
+    low = np.min(paths, axis=0)
+    np.savetxt(prefix + "af.tsv", np.mean(paths, axis=0), delimiter="\t")
+    for k in range(K):
+        axs[1].plot(np.mean(paths, axis=0)[:, k], color=cols[k])
+        axs[1].fill_between(
+            t, low[:, k], high[:, k], alpha=0.2, color=cols[k]
+        )
+
+    mp = bmws.data.bootstrap_paths(data, 1000, 42)
+
+    a = [int(y) for x, y in zip(data.obs, data.t) if x[0] > 0]
+    b = [x[1] for x, y, theta in zip(data.obs, data.t, data.theta) if x[0] > 0]
+    try:
+        sns.regplot(
+            x=a,
+            y=b,
+            logistic=True,
+            scatter=True,
+            ax=axs[2],
+            line_kws={"color": "black", "alpha": 0.5},
+        )
+    except:
+        pass
+    axs[0].set(xlabel="Generations before present", ylabel="Selection coefficient")
+    axs[1].set(xlabel="Generations before present", ylabel="Allele frequency")
+    axs[2].set(xlabel="Generations before present", ylabel="Observations")
+    fig.suptitle(f"{pop} {snp} ll:{loglik:.1f}")
+    plt.tight_layout()
+    fig.savefig(outfile)
+
+def plot_sim_trajectories(inputs, sim, outfile):
+    ss = []
+    t = np.arange(400)
+    for a in inputs:
+        (slns, paths, _), logliks = load_file(a)
+        st = [sln(t) for sln in slns]
+        st = st[500:][::20]
+        q25, med, q75 = np.quantile(st, [0.25, 0.5, 0.75], axis=0)
+        ss.append(med)
+    # ss = np.median(ss, axis=0)
+    _, mdl = simulation(sim, 42)
+    true_s = mdl['s']
+    fig, axs = plt.subplots(ncols=2, sharex=True, sharey=True)
+    colors = ["#BBD2FD", "#63D5F9", "#2A67D6"]
+    print(ss)
+    for k in range(3):
+        for s in ss:
+            axs[0].plot(t, s[:, k], color=colors[k])
+        axs[1].plot(t, true_s[:400, k], color=colors[k], linestyle="--")
+    axs[0].set_ylabel("$s$")
+    axs[0].set_xlabel("Generations ago")
+    axs[1].set_xlabel("Generations ago")
+    axs[0].set_ylim(-.11, .11)
+    axs[1].set_ylim(-.11, .11)
+    fig.tight_layout()
+    fig.savefig(outfile)
+
+def read_data(pop):
+    pop = pop.lower()
+    admixture_proportions = pd.read_csv("data/" + pop + "_sample_info.txt", sep="\t")
+    admixture_proportions["generation"] = [
+        int(x) for x in round(admixture_proportions["Date"] / 30)
+    ]
+    admixture_proportions = admixture_proportions[
+        (admixture_proportions["Date"] <= 10000)
+    ]
+
+    # merge allele counts
+    counts = pd.read_csv("data/" + pop + "_snp_acs.raw", sep="\t")
+    snps = list(counts.columns)[6:]
+    data = pd.merge(admixture_proportions, counts, on="IID")
+
+    # Parameters for data matrices
+    T = max(data["generation"]) + 1
+    N = max(data["generation"].value_counts().values)
+    K = admixture_proportions.shape[1] - 7
+    datasets = []
+    for snp in snps:
+        records = []
+        for gen, count in data["generation"].value_counts().items():
+            this_data = data[data["generation"] == gen]
+            M = this_data.shape[0]
+            for i in range(M):
+                if not this_data[snp].isna().iloc[i]:
+                    rec = {"t": gen}
+                    rec["obs"] = (1, int(this_data[snp].values[i] / 2))
+                    rec["theta"] = [
+                        this_data["k" + str(k + 1)].iloc[i] for k in range(K - 1)
+                    ]
+                    rec["theta"].append(1 - sum(rec["theta"]))
+                    records.append(rec)
+
+        datasets.append(bmws.data.Dataset.from_records(records))
+
+    return datasets, snps
+
+def run_analysis(data, sln0=None, alpha=1e2, em_iterations=50, M=10_000):
+    if sln0 is None:
+        sln0 = Selection.default(T=data.T, K=data.K)
+    mp = bmws.data.regression_paths(data, M)
+    return gibbs(sln0=sln0, data=data, alpha=alpha, mean_paths=mp, niter=em_iterations, M=M, seed=42, N_E=N_E)
+
+def resample_individuals(data, Ne, rng, em_iterations, alpha, M):
+    # Now resample observations
+    t = data.t
+    theta = data.theta
+    obs = data.obs
+    records = []
+    Tmax = int(max(t))
+    present_obs = (data.t == 0).nonzero()[0]
+    nonzero_anc_obs = np.logical_and(data.obs[:, 0] > 0, data.t != 0).nonzero()[0]
+    for k in range(len(present_obs)):  # keep present-day individuals.
+        pik = present_obs[k]
+        rec = {"t": data.t[pik]}
+        rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+        rec["theta"] = data.theta[pik]
+        records.append(rec)
+    pik = 0  # include earlist timepoint to maintain size
+    rec = {"t": data.t[pik]}
+    rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+    rec["theta"] = data.theta[pik]
+    records.append(rec)
+    for k in range(len(nonzero_anc_obs)):  # resample ancient individuals
+        pik = rng.choice(nonzero_anc_obs)
+        rec = {"t": data.t[pik]}
+        rec["obs"] = (int(obs[pik][0]), int(obs[pik][1]))
+        rec["theta"] = data.theta[pik]
+        records.append(rec)
+    dataset_samples = bmws.data.Dataset.from_records(records)
+    # run inference
+    slns, paths = run_analysis(dataset_samples, alpha=alpha, em_iterations=em_iterations, M=M)
+    return sln_star, dataset_samples
+
+
+def dump_file(obj, fn):
+    with open(fn, "wb") as f:
+        pickle.dump(obj, file=f)
+
+
+def load_file(fn):
+    with open(fn, "rb") as f:
+        return pickle.load(f)
+
+
+wildcard_constraints:
+    population=r"[A-Z0-9_]+",
+    seed=r"\d+",
+    snp=r"\w+",
+
+
+rule read_data_test:
+    output:
+        config["results_dir"]+"TEST/data.pkl",
+    run:
+        ds = bmws.data.Dataset.from_records(
+            [
+                dict(t=20, theta=np.array([0.1, 0.3, 0.6]), obs=(1, 1)),
+                dict(t=18, theta=np.array([1.0, 0.0, 0.0]), obs=(1, 0)),
+                dict(t=10, theta=np.array([0.1, 0.4, 0.5]), obs=(2, 1)),
+                dict(t=10, theta=np.array([0.1, 0.0, 0.9]), obs=(5, 2)),
+                dict(t=10, theta=np.array([0.5, 0.0, 0.5]), obs=(1, 1)),
+                dict(t=2, theta=np.array([0.2, 0.5, 0.3]), obs=(1, 1)),
+                dict(t=2, theta=np.array([0.5, 0.2, 0.3]), obs=(1, 0)),
+                dict(t=1, theta=np.array([0.5, 0.2, 0.3]), obs=(1, 1)),
+                dict(t=0, theta=np.array([0.0, 1.0, 0.0]), obs=(3, 2)),
+                dict(t=0, theta=np.array([0.2, 0.2, 0.6]), obs=(4, 1)),
+            ]
+        )
+        snps = ["test"]
+        dump_file(([ds], snps), output[0])
+
+
+rule read_data:
+    output:
+        config["results_dir"]+r"{population}/data.pkl",
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        res = read_data(wildcards.population)
+        dump_file(res, output[0])
+
+
+def _params(wc):
+    alpha = 10 ** float(wc.log_alpha)
+    em_iterations = int(wc.em_iterations)
+    M = int(wc.M)
+    return alpha, em_iterations, M
+
+rule prior:
+    input:
+        config["results_dir"]+"{population}/data.pkl",
+    output:
+        config["results_dir"]+"{population}/{snp}/prior_{M}.pkl"
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        datasets, snps = load_file(input[0])
+        wc = wildcards
+        try:
+            data = datasets[snps.index(wc.snp)]
+        except ValueError:
+            raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
+        M = int(wc.M)
+        mp = bmws.data.regression_paths(data, M)
+        dump_file(mp, output[0])
+
+def simulation(i, seed, T, D):
+    rng = np.random.default_rng(seed)
+    s = np.zeros((T, D))
+    Ne = np.full_like(s, 1e4)
+    f0 = np.array([0.1, 0.1, 0.1])
+    if i == 0: #no selection anywhere
+        alpha = np.ones(3)
+    elif i == 1:
+        s[:(T // 2), :] = 0.01 #s=0.01 for half the time in all 3 components
+    elif i == 2:
+        s[:(T // 2), :] = 0.02 #s=0.02 for half the time in all 3 components
+    elif i == 3:
+        s[:(T // 2), :] = 0.05 #s=0.05 for half the time in all 3 components
+    elif i == 4:
+        s[:(T // 2), :] = 0.1 #s=0.1 for half the time in all 3 components
+    elif i == 5:
+        s[(T//4):(T+1-(T//4)),1] = 0.01 #s=0.01 for middle half the time in one component
+    elif i == 6:
+        s[(T//4):(T+1-(T//4)),1] = 0.02 #s=0.02 for middle half the time in one component
+    elif i == 7:
+        s[(T//4):(T+1-(T//4)),1] = 0.05 #s=0.05 for middle half the time in one component
+    elif i == 8:
+        s[(T//4):(T+1-(T//4)),1] = 0.1 #s=0.1 for middle half the time in one component
+    elif i == 9:
+        s[:, 0] = 0.1 #constant selection at s=0.1 in 1 component
+    elif i == 10:
+        s[:, 0] = 0.01 #constant selection at s=0.01 in 1 component
+    elif i == 11:
+        s[:, 0] = 0.02 #constant selection at s=0.02 in 1 component
+    elif i == 12:
+        s[:, 0] = 0.05 #constant selection at s=0.05 in 1 component
+    elif i == 13:
+        s[:, :] = 0.02 #constant selection at s=0.02 in all component
+    elif i == 14:
+        s[:, :] = 0.05 #constant selection at s=0.05 in all component
+    elif i == 15:
+        s[:, :] = 0.01 #constant selection at s=0.01 in all component
+    elif i == 16:
+        s[:, :] = 0.1 #constant selection at s=0.1 in all component
+    mdl = dict(s=s, f0=f0, Ne=Ne)
+    return mdl
+
+rule sim:
+    input:
+        config["results_dir"]+"EAS/data.pkl",
+    output:
+        config["results_dir"]+"SIM_{i}_{seed}/data.pkl"
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        i = int(wildcards.i)
+        seed = int(wildcards.seed)
+        tup = load_file(input[0])
+        template_data = tup[0][0]
+        mdl = simulation(i, seed, template_data.T, template_data.K)
+        data, af = bmws.sim.sim_admix(mdl, template_data, data, seed)
+        print(output[0])
+        dump_file(([data], ["sim"]), output[0])
+
+rule analyze:
+    input:
+        config["results_dir"]+"{population}/data.pkl",
+    output:
+        config["results_dir"]+"{population}/{snp}/a{log_alpha}/em{em_iterations}/M{M}/analyze.pkl"
+    resources:
+        runtime=RUNTIME,
+        slurm_extra="--gpus 1",
+        slurm_partition="gpu,spgpu",
+        mem="16G",
+        lsf_queue="9_lpcgpu",
+        lsf_extra='-gpu "num=1" -n 1',
+    threads: 2
+    run:
+        print(input[0])
+        datasets, snps = load_file(input[0])
+        wc = wildcards
+        M = int(wc.M)
+        print(M)
+        try:
+            data = datasets[snps.index(wc.snp)]
+        except ValueError:
+            raise ValueError(f"Cannot find SNP {wc.snp}. SNPS are {snps}")
+        Ne = 1e4
+        alpha, em_iterations, M = _params(wildcards)
+        sln0 = Selection.default(T=data.T, K=data.K)
+        res = gibbs(sln0, data, alpha, em_iterations, M, seed=42)
+        dump_file(res, output[0])
+
+
+rule plot:
+    input:
+        config["results_dir"]+"{population}/data.pkl",
+        config["results_dir"]+"{population}/{snp}/{stuff}/analyze.pkl",
+    output:
+        config["results_dir"]+"../figures/{stuff}/{population}_{snp}.pdf",
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        datasets, snps = load_file(input[0])
+        data = datasets[snps.index(wildcards.snp)]
+        (slns, paths, _), logliks = load_file(input[1])
+        plot_trajectories(wildcards.population, wildcards.snp, output[0], slns, paths, data, logliks)
+
+
+rule altplot:
+    input:
+        config["results_dir"]+"../figures/{stuff}/{population}_{snp}.pdf",
+    output:
+        config["results_dir"]+"{population}/{snp}/{stuff}/plot.pdf"
+    localrule: True
+    shell:
+        "cp {input} {output}"
+
+rule plot_compare:
+    input:
+        expand(config["results_dir"]+"SIM_{{i}}_{seed}/sim/{{stuff}}/analyze.pkl", seed=range(10))#10
+    output:
+        config["results_dir"]+"../figures/{stuff}/SIM_{i}_compare.pdf",
+    resources:
+        mem="16G",
+        runtime=120,
+    run:
+        jax.config.update("jax_platforms", "cpu")
+        i = int(wildcards.i)
+        plot_sim_trajectories(input, i, output[0])
+
+ALL_SNPS = {
+    "EAS": ["rs1229984_TC"] #["rs4480996_GA","snp_4_100142302_AC","rs723475_GT","rs1737076_GA","rs1063355_TG","rs174548_CG","rs2333656_CT","rs10410274_TG","rs11698283_TC"],
+#    "EUR": ["rs4988235_AG","rs2245556_CT","rs12651171_TC","rs2298755_GC","rs160578_AG","rs16891982_GC","rs10473090_CA","rs7735891_TC","rs6555913_GA","rs9468344_GT","rs2523626_GA","rs204994_TC","rs9273373_GA","rs1979598_AG","rs9644480_AG","rs2840334_TG","rs174548_CG","rs7944926_GA","rs1979865_AG","rs12913832_GA","rs1426654_AG","rs8072449_AG","rs7225592_GA","rs10410274_TG","rs140114_CT"],
+#    "SAM": ["rs1051798_CT","rs2973043_AG","rs2735003_TG","rs9273343_CT","rs2317731_TC","rs6584603_GA","rs1790341_CT","rs7168739_AG","rs2386983_GA","rs2072786_CG","rs5760093_AG"],
+#    "SAS": ["rs4988235_AG","rs17353680_GA","rs1426654_AG"],
+#    "AFR":["rs6479327_GA"]
+}
+
+rule all:
+    input:
+        [
+            config["results_dir"]+f"../figures/a{a}/em5000/M5000/{population}_{snp}.pdf"
+            for population in ALL_SNPS
+            for snp in ALL_SNPS[population]
+            for a in [1]#,1.5,2,2.5,3,3.5,4]
+        ]
+
+rule run_sims:
+    input:
+        [config["results_dir"]+f"../figures/a2/em2002/M5000/SIM_{i}_compare.pdf" for i in [0,1,7,10,16]]

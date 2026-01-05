@@ -1,22 +1,9 @@
-import logging
-
 import jax
+import platformdirs
 
-from bmws.betamix import BetaMixture
-from bmws.common import Observation
-from bmws.estimate import estimate, estimate_em
-from bmws.sim import sim_and_fit, sim_wf
-
-jax.config.update("jax_enable_x64", True)
-logging.getLogger("absl").setLevel(logging.ERROR)
-logging.basicConfig(level=logging.INFO)
-
-
-__all__ = [
-    "estimate",
-    "estimate_em",
-    "sim_and_fit",
-    "sim_wf",
-    "Observation",
-    "BetaMixture",
-]
+jax.config.update("jax_compilation_cache_dir", platformdirs.user_cache_dir("bmws"))
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update(
+    "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
+)
